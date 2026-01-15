@@ -12,6 +12,7 @@
 9. [Armazenamento Vetorial](#armazenamento-vetorial)
 10. [Geração de Respostas](#geração-de-respostas)
 11. [Múltiplos Contextos](#múltiplos-contextos)
+12. [API REST](#api-rest)
 
 ---
 
@@ -1211,6 +1212,257 @@ stats = context_manager.get_context_stats("condominio_169")
 ```
 
 Útil para monitoramento e analytics.
+
+---
+
+## API REST
+
+O sistema inclui uma **API REST completa** desenvolvida com FastAPI que permite integração programática com outras aplicações.
+
+### Visão Geral da API
+
+**Base URL**: `http://localhost:8000`
+
+**Documentação automática**:
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+
+### Principais Endpoints
+
+#### 1. Consultar (Query)
+
+**POST** `/api/query`
+
+Faz perguntas ao sistema RAG e recebe respostas contextualizadas.
+
+```python
+import requests
+
+response = requests.post("http://localhost:8000/api/query", json={
+    "question": "Posso ter cachorro no condomínio?",
+    "context": "cond_391",
+    "llm_provider": "openai",
+    "embedding_provider": "ollama",
+    "top_k": 8
+})
+
+result = response.json()
+print("Resposta:", result['answer'])
+print("Fontes:", result['sources'])
+```
+
+**Response**:
+```json
+{
+  "answer": "De acordo com o Regimento Interno...",
+  "sources": [
+    {
+      "content": "Artigo 15 - Não é permitido...",
+      "file": "regimento.pdf",
+      "chunk": "42/150"
+    }
+  ],
+  "context": "cond_391",
+  "llm_provider": "openai",
+  "embedding_provider": "ollama"
+}
+```
+
+#### 2. Indexar Documentos
+
+**POST** `/api/index`
+
+Faz upload e indexa documentos via API.
+
+```bash
+curl -X POST http://localhost:8000/api/index \
+  -F "files=@regimento.pdf" \
+  -F "context=cond_391" \
+  -F "embedding_provider=ollama"
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "message": "Documentos indexados com sucesso",
+  "files_indexed": ["regimento.pdf"],
+  "total_chunks": 234,
+  "context": "cond_391"
+}
+```
+
+#### 3. Listar Contextos
+
+**GET** `/api/contexts`
+
+Retorna lista de todos os contextos com estatísticas.
+
+```javascript
+// JavaScript
+const response = await fetch('http://localhost:8000/api/contexts');
+const data = await response.json();
+console.log(data.contexts);
+```
+
+**Response**:
+```json
+{
+  "contexts": [
+    {
+      "name": "cond_391",
+      "total_files": 12,
+      "total_chunks": 456,
+      "created_at": "2024-01-15T10:30:00",
+      "last_updated": "2024-01-20T15:45:00"
+    }
+  ],
+  "total": 1
+}
+```
+
+#### 4. Criar Contexto
+
+**POST** `/api/contexts`
+
+Cria novo contexto vazio.
+
+```python
+response = requests.post(
+    "http://localhost:8000/api/contexts",
+    json={"name": "cond_392"}
+)
+```
+
+#### 5. Deletar Contexto
+
+**DELETE** `/api/contexts/{context_name}`
+
+Remove contexto e todos os dados (irreversível).
+
+```bash
+curl -X DELETE http://localhost:8000/api/contexts/cond_392
+```
+
+#### 6. Estatísticas de Contexto
+
+**GET** `/api/contexts/{context_name}/stats`
+
+Obtém estatísticas detalhadas de um contexto.
+
+```bash
+curl http://localhost:8000/api/contexts/cond_391/stats
+```
+
+### Como Executar a API
+
+**Opção 1: Local (Desenvolvimento)**
+```bash
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Opção 2: Docker**
+```bash
+docker-compose up rag-api
+```
+
+**Opção 3: API + Gradio Juntos**
+```bash
+# Terminal 1 - API
+python -m uvicorn src.api:app --port 8000 --reload
+
+# Terminal 2 - Gradio
+python app.py
+```
+
+### Recursos da API
+
+- ✅ **RESTful**: Segue padrões REST
+- ✅ **Validação automática**: Pydantic models
+- ✅ **Documentação interativa**: Swagger UI e ReDoc
+- ✅ **CORS habilitado**: Acesso de qualquer origem
+- ✅ **Tratamento de erros**: Mensagens claras
+- ✅ **Múltiplos contextos**: Suporte completo
+- ✅ **Flexibilidade**: Escolha LLM e embeddings provider
+- ✅ **Upload de arquivos**: Indexação via API
+
+### Casos de Uso da API
+
+1. **Integração com Frontend Web**
+   - React, Vue, Angular podem consumir a API
+   - Criar interface customizada
+
+2. **Chatbots**
+   - WhatsApp, Telegram, Discord
+   - Integrar RAG em bots existentes
+
+3. **Automações**
+   - Scripts Python para consultas em lote
+   - Pipelines de dados
+
+4. **Mobile Apps**
+   - iOS, Android podem consultar via HTTP
+   - Experiência mobile nativa
+
+5. **Microsserviços**
+   - Integrar RAG em arquitetura de microsserviços
+   - Comunicação entre serviços
+
+### Exemplo Completo: Chatbot WhatsApp
+
+```python
+# chatbot_whatsapp.py
+import requests
+from flask import Flask, request
+
+app = Flask(__name__)
+RAG_API = "http://localhost:8000"
+
+@app.route("/whatsapp", methods=['POST'])
+def whatsapp_webhook():
+    # Recebe mensagem do WhatsApp
+    message = request.json['message']
+    user_id = request.json['user_id']
+
+    # Consulta RAG
+    response = requests.post(f"{RAG_API}/api/query", json={
+        "question": message,
+        "context": f"user_{user_id}",
+        "llm_provider": "openai",
+        "embedding_provider": "ollama"
+    })
+
+    answer = response.json()['answer']
+
+    # Envia resposta de volta
+    return {"reply": answer}
+
+if __name__ == "__main__":
+    app.run(port=5000)
+```
+
+### Segurança
+
+**CORS**: Por padrão habilitado para todas as origens. Em produção, restrinja:
+```python
+allow_origins=["https://seu-frontend.com"]
+```
+
+**API Keys**: Mantidas em variáveis de ambiente (`.env`)
+
+**Autenticação** (futuro): JWT, OAuth2
+
+**Rate Limiting** (futuro): Limitar requisições por IP
+
+### Documentação Completa
+
+Para documentação detalhada da API, consulte [API_REST.md](API_REST.md), que inclui:
+- Todos os endpoints com exemplos
+- Códigos de erro e tratamento
+- Exemplos em Python, JavaScript, cURL
+- Configuração Docker
+- Performance e otimizações
+- Monitoramento e logs
 
 ---
 

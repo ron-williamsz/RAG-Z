@@ -1,11 +1,18 @@
 """RAG Simple - Interface Gradio Multi-Contexto para indexação e consulta de documentos."""
 
 import os
+import logging
 from pathlib import Path
 from typing import List, Optional
 
 import gradio as gr
 from dotenv import load_dotenv
+
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s - %(message)s'
+)
 
 from src.document_loader import DocumentLoader
 from src.chunker import Chunker
@@ -694,6 +701,278 @@ with gr.Blocks(
     status_btn.click(
         fn=get_status,
         outputs=[status_output],
+    )
+
+    # =========================================================================
+    # VERIFICATION SECTION
+    # =========================================================================
+
+    gr.Markdown("---")
+    gr.Markdown("""
+    ## 🔍 Verificação de Documentos
+
+    Compare documentos para verificar consistência de entidades (ex: listas de funcionários, números de nota fiscal).
+
+    **Fluxo:** Extrair entidades de referência → Enviar documentos alvo → Visualizar resultados da comparação
+    """)
+
+    with gr.Row():
+        # LEFT COLUMN: Reference Extraction
+        with gr.Column(scale=1):
+            gr.Markdown("#### Passo 1: Extrair Referência")
+
+            verify_base_doc = gr.File(
+                label="Documento Base de Referência",
+                file_types=[".pdf", ".docx", ".xlsx", ".txt"],
+                file_count="single"
+            )
+
+            verify_extraction_query = gr.Textbox(
+                label="O que extrair?",
+                placeholder="ex: 'lista de nomes de funcionários', 'números de notas fiscais'",
+                lines=2
+            )
+
+            verify_llm_extract = gr.Dropdown(
+                choices=["GPT-4o (OpenAI)", "Claude Sonnet (Anthropic)"],
+                value="GPT-4o (OpenAI)",
+                label="LLM para Extração"
+            )
+
+            verify_extract_btn = gr.Button("🔍 Extrair Referência", variant="primary")
+
+            verify_session_output = gr.Textbox(
+                label="Informações da Sessão",
+                lines=8,
+                interactive=False
+            )
+
+            verify_session_id = gr.State("")  # Hidden state for session ID
+
+        # RIGHT COLUMN: Target Comparison
+        with gr.Column(scale=1):
+            gr.Markdown("#### Passo 2: Comparar Alvos")
+
+            verify_target_docs = gr.File(
+                label="Documentos Alvo",
+                file_types=[".pdf", ".docx", ".xlsx", ".txt"],
+                file_count="multiple"
+            )
+
+            verify_target_query = gr.Textbox(
+                label="Query para Documento Alvo (opcional)",
+                placeholder="Deixe vazio para usar a mesma query do Passo 1, ou especifique outra query",
+                lines=2,
+                info="Se os documentos têm formatos diferentes, você pode especificar uma query diferente aqui"
+            )
+
+            verify_strictness = gr.Slider(
+                minimum=0.5,
+                maximum=1.0,
+                value=0.7,
+                step=0.05,
+                label="Rigor da Correspondência",
+                info="0.5 = flexível (aceita variações), 1.0 = rigoroso (apenas exato)"
+            )
+
+            verify_llm_compare = gr.Dropdown(
+                choices=["GPT-4o (OpenAI)", "Claude Sonnet (Anthropic)"],
+                value="GPT-4o (OpenAI)",
+                label="LLM para Comparação"
+            )
+
+            verify_compare_btn = gr.Button("⚖️ Comparar", variant="secondary")
+
+            verify_comparison_output = gr.Textbox(
+                label="Resultados da Comparação",
+                lines=8,
+                interactive=False
+            )
+
+    # Full-width detailed results
+    with gr.Row():
+        verify_detailed_results = gr.Markdown("")
+
+    # Verification event handlers
+    def verify_extract_reference_entities(base_doc, query, llm_choice):
+        """Handler for reference extraction."""
+        from pathlib import Path
+        from datetime import datetime, timedelta
+
+        if not base_doc:
+            return "❌ Por favor, envie um documento base de referência.", ""
+
+        if not query or not query.strip():
+            return "❌ Por favor, especifique o que extrair.", ""
+
+        try:
+            # Map LLM choice to provider
+            provider = "openai" if "OpenAI" in llm_choice else "anthropic"
+
+            # Call verification engine
+            from src.verification_engine import VerificationEngine
+            engine = VerificationEngine()
+
+            reference = engine.extract_reference(
+                base_document_path=base_doc.name,
+                extraction_query=query,
+                llm_provider=provider,
+                session_ttl=3600
+            )
+
+            result_text = f"""✅ Extração de Referência Completa!
+
+📄 **Documento Base:** {reference.base_document}
+🔍 **Query:** {query}
+🤖 **LLM:** {llm_choice}
+
+📊 **Entidades Extraídas ({len(reference.entities)}):**
+"""
+            # Show first 20 entities
+            for i, entity in enumerate(reference.entities[:20], 1):
+                result_text += f"\n{i}. {entity}"
+
+            if len(reference.entities) > 20:
+                result_text += f"\n... e mais {len(reference.entities) - 20}"
+
+            expires_at = datetime.fromisoformat(reference.expires_at.replace('Z', '+00:00')) if isinstance(reference.expires_at, str) else reference.expires_at
+            result_text += f"""
+
+⏱️ **Sessão expira em:** 1 hora
+🔑 **ID da Sessão:** {reference.session_id[:16]}...
+
+✅ Você já pode enviar os documentos alvo para comparar."""
+
+            return result_text, reference.session_id
+
+        except Exception as e:
+            return f"❌ Extração falhou: {str(e)}", ""
+
+    def verify_compare_target_documents(target_docs, target_query, session_id, strictness, llm_choice):
+        """Handler for target comparison."""
+        from pathlib import Path
+
+        if not target_docs:
+            return "❌ Por favor, envie documentos alvo.", ""
+
+        if not session_id:
+            return "❌ Por favor, extraia as entidades de referência primeiro (Passo 1).", ""
+
+        try:
+            # Map LLM choice to provider
+            provider = "openai" if "OpenAI" in llm_choice else "anthropic"
+
+            # Call verification engine
+            from src.verification_engine import VerificationEngine
+            engine = VerificationEngine()
+
+            # Get target file paths
+            target_paths = [doc.name for doc in target_docs] if isinstance(target_docs, list) else [target_docs.name]
+
+            # Use target_query if provided, otherwise None (will use reference query)
+            target_extraction_query = target_query.strip() if target_query and target_query.strip() else None
+
+            results = engine.compare_targets(
+                session_id=session_id,
+                target_document_paths=target_paths,
+                llm_provider=provider,
+                strictness=strictness,
+                target_extraction_query=target_extraction_query
+            )
+
+            # Calculate summary
+            total_verified = sum(1 for r in results if r.status == "verified")
+            total_partial = sum(1 for r in results if r.status == "partial_match")
+            total_mismatch = sum(1 for r in results if r.status == "mismatch")
+            avg_confidence = sum(r.overall_confidence for r in results) / len(results) if results else 0.0
+
+            results_text = f"""✅ Comparação Completa!
+
+📊 **Resumo:**
+• Total de alvos: {len(results)}
+• ✅ Verificados: {total_verified}
+• ⚠️ Correspondência parcial: {total_partial}
+• ❌ Não correspondente: {total_mismatch}
+• Confiança média: {avg_confidence:.1%}
+
+Rigor: {strictness:.2f}
+
+📋 Veja os resultados detalhados abaixo."""
+
+            # Build detailed markdown
+            detailed = "## Resultados Detalhados\n\n"
+
+            for i, result in enumerate(results, 1):
+                status_emoji = {"verified": "✅", "partial_match": "⚠️", "mismatch": "❌"}[result.status]
+
+                detailed += f"### {i}. {result.target_document}\n"
+                detailed += f"**Status:** {status_emoji} {result.summary}\n\n"
+
+                # Show total entities extracted from target
+                total_target_entities = len(result.extracted_target_entities)
+                detailed += f"**📊 Entidades extraídas do alvo:** {total_target_entities}\n"
+                detailed += f"**📊 Entidades na referência:** {len(result.matched_entities)}\n\n"
+
+                # Show ALL extracted entities from target (for debugging)
+                if result.extracted_target_entities:
+                    detailed += f"<details><summary>🔍 <b>Ver todas as {len(result.extracted_target_entities)} entidades extraídas do alvo</b></summary>\n\n"
+                    for i, entity in enumerate(result.extracted_target_entities, 1):
+                        detailed += f"{i}. {entity}\n"
+                    detailed += "\n</details>\n\n"
+
+                # Show matched entities
+                matched = [m for m in result.matched_entities if m.match_type != "no_match"]
+                if matched:
+                    detailed += "**Entidades Correspondentes:**\n"
+                    for m in matched[:10]:  # Show first 10
+                        match_emoji = "✅" if m.match_type == "exact" else "🔄"
+                        detailed += f"- {match_emoji} {m.reference_entity}"
+                        if m.target_entity != m.reference_entity:
+                            detailed += f" → {m.target_entity}"
+                        detailed += f" ({m.confidence:.0%})\n"
+                    if len(matched) > 10:
+                        detailed += f"... e mais {len(matched) - 10}\n"
+                    detailed += "\n"
+
+                # Show missing entities
+                if result.missing_in_target:
+                    detailed += "**Faltando no alvo:**\n"
+                    for entity in result.missing_in_target[:10]:
+                        detailed += f"- ❌ {entity}\n"
+                    if len(result.missing_in_target) > 10:
+                        detailed += f"... e mais {len(result.missing_in_target) - 10}\n"
+                    detailed += "\n"
+
+                # Show extra entities
+                if result.extra_in_target:
+                    detailed += "**Extras no alvo (não estão na referência):**\n"
+                    for entity in result.extra_in_target[:10]:
+                        detailed += f"- ➕ {entity}\n"
+                    if len(result.extra_in_target) > 10:
+                        detailed += f"... e mais {len(result.extra_in_target) - 10}\n"
+                    detailed += "\n"
+
+                detailed += "---\n\n"
+
+            return results_text, detailed
+
+        except ValueError as e:
+            # Session expired or not found
+            return f"❌ {str(e)}\n\nPor favor, extraia as entidades de referência novamente (Passo 1).", ""
+        except Exception as e:
+            return f"❌ Comparação falhou: {str(e)}", ""
+
+    # Wire up verification events
+    verify_extract_btn.click(
+        fn=verify_extract_reference_entities,
+        inputs=[verify_base_doc, verify_extraction_query, verify_llm_extract],
+        outputs=[verify_session_output, verify_session_id]
+    )
+
+    verify_compare_btn.click(
+        fn=verify_compare_target_documents,
+        inputs=[verify_target_docs, verify_target_query, verify_session_id, verify_strictness, verify_llm_compare],
+        outputs=[verify_comparison_output, verify_detailed_results]
     )
 
     gr.Markdown("""

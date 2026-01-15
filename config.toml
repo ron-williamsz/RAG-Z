@@ -39,3 +39,39 @@ faiss_index_dir = "data/faiss_index"
 # Configuração do prompt do sistema (personalizável)
 [prompt]
 system_context = "documentos de condomínio, regulamentos, convenções e assuntos relacionados"
+
+# === HIERARQUIA LEGAL PARA CONSULTAS CONDOMINIAIS ===
+# Contextos que devem ser consultados na ordem de hierarquia legal
+# 1º codigo_civil - Código Civil (Lei 10.406/2002) - Norma suprema
+# 2º lei_condominios - Lei de Condomínios (Lei 4.591/64)
+# 3º cond_xxxx - Documentos específicos do condomínio (Convenção, Regimento, Atas)
+[legal_hierarchy]
+# Contextos de legislação (indexar estes documentos nos contextos abaixo)
+codigo_civil_context = "codigo_civil"
+lei_condominios_context = "lei_condominios"
+# Chunks a recuperar de cada contexto hierárquico
+top_k_per_context = 3
+
+# Configuração de verificação de documentos
+[verification]
+# Tempo de vida da sessão em segundos (padrão: 24 horas = 86400 segundos)
+session_ttl = 86400
+# Máximo de entidades a extrair por documento
+max_entities = 500
+# Strictness padrão para matching (0.5-1.0)
+default_strictness = 0.7
+# Temperatura do LLM para extração (0.0 = determinístico)
+extraction_temperature = 0.0
+# Temperatura do LLM para matching (0.0 = determinístico)
+matching_temperature = 0.0
+
+# === OTIMIZAÇÕES DE MATCHING (Etapa 2) ===
+# Threshold para aceitar automaticamente como match semântico (sem LLM)
+# Valores mais altos = mais conservador, menos matches automáticos
+high_confidence_threshold = 0.95
+# Threshold mínimo para considerar candidato para validação LLM
+# Valores mais baixos = mais candidatos analisados, maior recall
+llm_candidate_threshold = 0.70
+# Número máximo de pares por chamada batch ao LLM
+# Valores maiores = menos chamadas, mas respostas mais longas
+llm_batch_size = 10

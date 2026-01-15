@@ -3,7 +3,7 @@ FROM python:3.11-slim
 
 # Metadados
 LABEL maintainer="RAG Simple"
-LABEL description="RAG System with LangChain, FAISS, and Gradio"
+LABEL description="RAG System with LangChain, FAISS, Gradio and REST API"
 
 # Variáveis de ambiente
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -35,20 +35,24 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY config.toml .
 COPY app.py .
 COPY src/ ./src/
+COPY start.sh .
+
+# Permissões do script de inicialização
+RUN chmod +x start.sh
 
 # Cria diretórios de dados com permissões corretas
-RUN mkdir -p data/documents data/faiss_index && \
+RUN mkdir -p data/documents data/faiss_index data/temp_uploads && \
     chmod -R 777 data/
 
 # Mantém root para evitar problemas de permissão com volumes montados
 # Em produção, considere usar um usuário específico com UID/GID correspondente
 
-# Expõe porta do Gradio
-EXPOSE 7860
+# Expõe portas: Gradio (7860) + API REST (8000)
+EXPOSE 7860 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:7860/ || exit 1
+# Health check - verifica ambos os serviços
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:7860/ && curl -f http://localhost:8000/health || exit 1
 
-# Comando de inicialização
-CMD ["python", "app.py"]
+# Comando de inicialização - executa ambos os serviços
+CMD ["./start.sh"]

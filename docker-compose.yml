@@ -5,7 +5,8 @@ services:
       dockerfile: Dockerfile
     container_name: rag-simple
     ports:
-      - "7860:7860"
+      - "7862:7860"   # Gradio UI (mapeado para 7862 no host)
+      - "8002:8000"   # API REST (mapeado para 8002 no host)
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -13,6 +14,8 @@ services:
       # Persistência LOCAL - dados visíveis no projeto
       - ./data/documents:/app/data/documents
       - ./data/faiss_index:/app/data/faiss_index
+      - ./data/temp_uploads:/app/data/temp_uploads
+      - ./data/verification_sessions:/app/data/verification_sessions
       # Acesso a drives externos (descomente e ajuste conforme necessário)
       # - G:/:/mnt/g:ro
       # - //servidor/pasta:/mnt/rede:ro
@@ -21,20 +24,21 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      test: ["CMD-SHELL", "curl -f http://localhost:7860 && curl -f http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
 
-  # Opcional: Serviço para desenvolvimento
+  # Opcional: Serviço para desenvolvimento (apenas Gradio, sem API)
   rag-dev:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: rag-dev
     ports:
-      - "7861:7860"
+      - "7861:7860"   # Gradio UI
+      - "8001:8000"   # API REST
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -42,6 +46,9 @@ services:
       # Persistência LOCAL - dados visíveis no projeto
       - ./data/documents:/app/data/documents
       - ./data/faiss_index:/app/data/faiss_index
+      - ./data/temp_uploads:/app/data/temp_uploads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     profiles:
       - dev
     restart: unless-stopped
