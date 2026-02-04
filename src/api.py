@@ -3,7 +3,7 @@
 import os
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,9 +21,17 @@ from .verification_models import (
     ExtractReferenceResponse,
     CompareTargetResponse,
 )
+from .governance import GovernanceManager, UserProfile
+from .conversation_manager import ConversationManager, Message
 
 
 # ==================== MODELS ====================
+
+class ConversationMessage(BaseModel):
+    """Mensagem de conversa."""
+    role: str = Field(..., description="Papel: 'user' ou 'assistant'")
+    content: str = Field(..., description="Conteúdo da mensagem")
+
 
 class QueryRequest(BaseModel):
     """Modelo de requisição para consultas."""
@@ -32,29 +40,65 @@ class QueryRequest(BaseModel):
     llm_provider: str = Field("openai", description="Provedor do LLM (openai, anthropic)")
     embedding_provider: str = Field("ollama", description="Provedor de embeddings (ollama, openai)")
     top_k: int = Field(8, description="Número de chunks a recuperar", ge=1, le=20)
-    return_sources: bool = Field(True, description="Se deve retornar fontes")
+    return_sources: bool = Field(True, description="Se deve retornar fontes no JSON")
     use_legal_hierarchy: bool = Field(False, description="Usar hierarquia legal (codigo_civil > lei_condominios > contexto)")
+
+    # Modo de resposta
+    show_source: bool = Field(False, description="Se True, menciona a fonte NA RESPOSTA (ex: 'De acordo com a convenção...')")
+    fluent_mode: bool = Field(True, description="Se True, resposta fluida sem mencionar hierarquia técnica")
+
+    # Histórico de conversa
+    conversation_history: Optional[List[ConversationMessage]] = Field(None, description="Histórico de mensagens da conversa")
+    conversation_id: Optional[str] = Field(None, description="ID da conversa no chatbot externo")
+
+    # Autenticação e perfil
+    user_id: Optional[str] = Field(None, description="ID do usuário")
+    is_authenticated: bool = Field(False, description="Se o usuário está autenticado")
+    is_admin: bool = Field(False, description="Se o usuário é administrador")
 
 
 class HierarchicalQueryRequest(BaseModel):
-    """Modelo de requisição para consultas com hierarquia legal."""
+    """Modelo de requisição para consultas com hierarquia legal completa."""
     question: str = Field(..., description="Pergunta do usuário", min_length=1)
-    context: str = Field(..., description="Contexto do condomínio (ex: cond_0388)")
+    context: str = Field("zangari_website", description="Contexto principal (ex: cond_0388, zangari_website)")
     llm_provider: str = Field("openai", description="Provedor do LLM (openai, anthropic)")
     embedding_provider: str = Field("ollama", description="Provedor de embeddings (ollama, openai)")
     top_k_per_context: int = Field(3, description="Chunks por contexto hierárquico", ge=1, le=10)
-    return_sources: bool = Field(True, description="Se deve retornar fontes")
+    return_sources: bool = Field(True, description="Se deve retornar fontes no JSON")
+
+    # Modo de resposta
+    show_source: bool = Field(False, description="Se True, menciona a fonte NA RESPOSTA (ex: 'De acordo com a convenção...')")
+    fluent_mode: bool = Field(True, description="Se True, resposta fluida sem mencionar hierarquia técnica")
+
+    # Hierarquia específica
+    hierarchy_level: Optional[str] = Field(None, description="Nível específico: convencao, regimento_interno, etc")
+    strict_hierarchy: bool = Field(False, description="Se True, só retorna do nível pedido")
+
+    # Histórico de conversa
+    conversation_history: Optional[List[ConversationMessage]] = Field(None, description="Histórico de mensagens")
+    conversation_id: Optional[str] = Field(None, description="ID da conversa no chatbot externo")
+
+    # Autenticação e perfil
+    user_id: Optional[str] = Field(None, description="ID do usuário")
+    is_authenticated: bool = Field(False, description="Se o usuário está autenticado")
+    is_admin: bool = Field(False, description="Se o usuário é administrador")
 
 
 class HierarchicalQueryResponse(BaseModel):
     """Modelo de resposta para consultas hierárquicas."""
     answer: str
     sources: Optional[List[dict]] = None
-    contexts_searched: List[str]
+    contexts_searched: List[str] = Field(default_factory=list, description="Todos os contextos pesquisados")
+    contexts_with_results: Optional[List[str]] = Field(default=None, description="Contextos onde encontrou resultados")
     hierarchy_applied: bool
+    hierarchy_level: Optional[str] = None
+    found_in_requested_level: Optional[bool] = Field(default=None, description="Se encontrou no nível solicitado")
+    fallback_used: Optional[bool] = Field(default=None, description="Se usou fallback de outros níveis")
+    user_profile: str = "anonymous"
     llm_provider: str
     embedding_provider: str
     context_format: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -134,16 +178,298 @@ app.add_middleware(
 # Global verification engine instance
 verification_engine = VerificationEngine()
 
+# ==================== CONFIG PERSISTENTE ====================
+
+RAG_CONFIG_PATH = Path("data/rag_config.json")
+
+
+def _load_rag_config() -> Dict[str, Any]:
+    """Carrega configuração persistente do RAG."""
+    if RAG_CONFIG_PATH.exists():
+        try:
+            with open(RAG_CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_rag_config(config: Dict[str, Any]) -> None:
+    """Salva configuração persistente do RAG."""
+    RAG_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(RAG_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+# Contextos públicos (acessíveis para anônimos)
+PUBLIC_CONTEXTS = ["zangari_website", "zangari_faq", "codigo_civil", "lei_condominios"]
+
+DEFAULT_ANONYMOUS_PROMPT = """Você é o assistente virtual público do Grupo Zangari.
+
+CONTEXTO ATIVO: {context_label} ({context_name})
+
+CONTEXTOS PÚBLICOS DISPONÍVEIS:
+{available_contexts}
+
+DIRETRIZES:
+- Responda APENAS com base nos documentos indexados no contexto ativo
+- NÃO invente informações que não estejam nos documentos
+- Se a informação não estiver disponível, informe que não encontrou nos documentos
+- NÃO solicite dados pessoais do usuário
+- Se o assunto exigir documentos restritos (convenção, regimento de condomínio específico), informe que esse conteúdo está disponível apenas para usuários autenticados
+- Seja cordial, claro e objetivo
+
+"""
+
+
+def get_anonymous_prompt(
+    context_name: str,
+    available_public_contexts: Optional[List[str]] = None,
+) -> str:
+    """
+    Gera prompt de sistema para usuários anônimos.
+
+    Usa prompt customizado do rag_config.json se existir,
+    caso contrário usa o DEFAULT_ANONYMOUS_PROMPT.
+
+    Args:
+        context_name: Nome técnico do contexto ativo (ex: zangari_website)
+        available_public_contexts: Lista de contextos públicos disponíveis
+
+    Returns:
+        Prompt formatado para prepend à mensagem do usuário
+    """
+    # Verifica se há prompt customizado
+    config = _load_rag_config()
+    prompt_template = config.get("anonymous_prompt", "") or DEFAULT_ANONYMOUS_PROMPT
+
+    # Monta label amigável
+    context_label = HIERARCHY_NAMES.get(context_name, context_name.replace("_", " ").title())
+
+    # Lista de contextos públicos disponíveis
+    if available_public_contexts is None:
+        cm = _get_context_manager()
+        all_contexts = cm.list_contexts()
+        available_public_contexts = [c for c in PUBLIC_CONTEXTS if c in all_contexts]
+
+    contexts_text = "\n".join([
+        f"- {HIERARCHY_NAMES.get(c, c.replace('_', ' ').title())} ({c})"
+        for c in available_public_contexts
+    ]) if available_public_contexts else "- Nenhum contexto público disponível"
+
+    return prompt_template.format(
+        context_name=context_name,
+        context_label=context_label,
+        available_contexts=contexts_text,
+    )
+
+
 # ==================== HELPERS ====================
 
 # Hierarquia legal para busca em múltiplos contextos
 # Ordem: 1º Código Civil, 2º Lei de Condomínios, 3º Contexto do Condomínio
 LEGAL_HIERARCHY_CONTEXTS = ["codigo_civil", "lei_condominios"]
 
+# Mapeamento de nomes amigáveis para níveis hierárquicos
+HIERARCHY_NAMES = {
+    "codigo_civil": "Código Civil (Lei 10.406/2002)",
+    "lei_condominios": "Lei de Condomínios (Lei 4.591/64)",
+    "convencao": "Convenção do Condomínio",
+    "regimento_interno": "Regimento Interno",
+    "ata_assembleia": "Ata de Assembleia",
+    "avisos": "Avisos e Comunicados",
+}
+
+# Níveis hierárquicos (menor = maior prioridade)
+HIERARCHY_LEVELS = {
+    "codigo_civil": 1,
+    "lei_condominios": 2,
+    "convencao": 3,
+    "regimento_interno": 4,
+    "ata_assembleia": 5,
+    "avisos": 6,
+}
+
+
+def _get_hierarchy_metadata(
+    context: str,
+    hierarchy_level: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Determina metadados de hierarquia baseado no contexto e nível.
+
+    Args:
+        context: Nome do contexto (ex: codigo_civil, cond_0388)
+        hierarchy_level: Nível hierárquico explícito (opcional)
+
+    Returns:
+        Dict com metadados de hierarquia
+    """
+    # Se é um contexto de legislação federal
+    if context in LEGAL_HIERARCHY_CONTEXTS:
+        return {
+            "hierarchy_context": context,
+            "hierarchy_name": HIERARCHY_NAMES.get(context, context),
+            "hierarchy_level": HIERARCHY_LEVELS.get(context, 99),
+            "is_legal_source": True,
+        }
+
+    # Se foi especificado um nível hierárquico
+    if hierarchy_level:
+        level_key = hierarchy_level.lower().replace(" ", "_")
+        return {
+            "hierarchy_context": context,
+            "hierarchy_name": HIERARCHY_NAMES.get(level_key, hierarchy_level),
+            "hierarchy_level": HIERARCHY_LEVELS.get(level_key, 99),
+            "is_legal_source": False,
+        }
+
+    # Contexto de condomínio sem nível especificado
+    return {
+        "hierarchy_context": context,
+        "hierarchy_name": f"Documentos do {context}",
+        "hierarchy_level": 99,  # Menor prioridade
+        "is_legal_source": False,
+    }
+
 
 def _get_context_manager() -> ContextManager:
     """Retorna instância do ContextManager."""
     return ContextManager()
+
+
+def _search_with_cascade(
+    question: str,
+    condo_context: str,
+    embedding_provider: str,
+    top_k_per_context: int = 3,
+    score_threshold: float = 0.7,
+    requested_level: Optional[str] = None,
+    strict_hierarchy: bool = False,
+) -> Dict[str, Any]:
+    """
+    Busca em CASCATA respeitando hierarquia legal.
+
+    Comportamento:
+    1. Se pediu nível específico (ex: convenção), busca PRIMEIRO nele
+    2. Se não encontrou (ou não pediu específico), busca na hierarquia em ordem
+    3. Retorna APENAS os contextos onde ENCONTROU algo relevante
+    4. Não menciona contextos onde não encontrou nada
+
+    Hierarquia padrão para condomínio:
+    1º Convenção → 2º Regimento → 3º Lei de Condomínios → 4º Código Civil → 5º Atas
+
+    Args:
+        question: Pergunta do usuário
+        condo_context: Contexto do condomínio (ex: cond_0388)
+        embedding_provider: Provedor de embeddings
+        top_k_per_context: Número de chunks por contexto
+        score_threshold: Score mínimo para considerar relevante
+        requested_level: Nível específico solicitado (ex: "convencao")
+        strict_hierarchy: Se True e pediu nível específico, só retorna desse nível
+
+    Returns:
+        Dict com:
+        - documents: Lista de documentos encontrados
+        - contexts_with_results: Contextos onde encontrou algo
+        - contexts_searched: Todos os contextos pesquisados
+        - found_in_requested: Se encontrou no nível solicitado
+        - fallback_used: Se usou fallback de outros níveis
+    """
+    cm = _get_context_manager()
+    available_contexts = cm.list_contexts()
+
+    # Hierarquia para condomínio (do mais específico para o mais geral)
+    condo_hierarchy = [
+        condo_context,  # Documentos do condomínio (convenção, regimento, etc)
+        "lei_condominios",
+        "codigo_civil",
+    ]
+
+    # Se pediu nível específico, reorganiza para buscar primeiro nele
+    if requested_level:
+        level_key = requested_level.lower().replace(" ", "_")
+        # Se é um dos níveis de legislação
+        if level_key in ["codigo_civil", "lei_condominios"]:
+            condo_hierarchy = [level_key] + [c for c in condo_hierarchy if c != level_key]
+
+    # Cria embeddings manager uma vez
+    embeddings_manager = EmbeddingsManager.from_config(
+        config_path="config.toml",
+        override_provider=embedding_provider,
+    )
+
+    all_documents = []
+    contexts_with_results = []
+    contexts_searched = []
+    found_in_requested = False
+
+    for ctx in condo_hierarchy:
+        if ctx not in available_contexts:
+            continue
+
+        contexts_searched.append(ctx)
+
+        try:
+            # Cria vector store para este contexto
+            vector_store = VectorStore(
+                embeddings=embeddings_manager.embeddings,
+                context_name=ctx,
+            )
+            vector_store.load()
+
+            # Busca documentos com scores
+            results = vector_store.search(
+                query=question,
+                top_k=top_k_per_context,
+            )
+
+            # Filtra por score threshold - só pega documentos relevantes
+            relevant_docs = []
+            for doc, score in results:
+                # FAISS retorna distância (menor = melhor), convertemos para similaridade
+                similarity = 1 - score if score <= 1 else 1 / (1 + score)
+                if similarity >= score_threshold:
+                    # Adiciona metadados de hierarquia
+                    doc.metadata["hierarchy_level"] = condo_hierarchy.index(ctx) + 1
+                    doc.metadata["hierarchy_context"] = ctx
+                    doc.metadata["hierarchy_name"] = HIERARCHY_NAMES.get(ctx, f"Documentos do {ctx}")
+                    doc.metadata["relevance_score"] = round(similarity, 3)
+                    relevant_docs.append(doc)
+
+            if relevant_docs:
+                all_documents.extend(relevant_docs)
+                contexts_with_results.append(ctx)
+
+                # Verifica se encontrou no nível solicitado
+                if requested_level:
+                    level_key = requested_level.lower().replace(" ", "_")
+                    if ctx == level_key or level_key in ctx:
+                        found_in_requested = True
+
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+
+    # Se strict_hierarchy e pediu nível específico, filtra apenas esse nível
+    if strict_hierarchy and requested_level and found_in_requested:
+        level_key = requested_level.lower().replace(" ", "_")
+        all_documents = [
+            doc for doc in all_documents
+            if doc.metadata.get("hierarchy_context") == level_key
+            or level_key in doc.metadata.get("hierarchy_context", "")
+        ]
+        contexts_with_results = [ctx for ctx in contexts_with_results if level_key in ctx]
+
+    return {
+        "documents": all_documents,
+        "contexts_with_results": contexts_with_results,
+        "contexts_searched": contexts_searched,
+        "found_in_requested": found_in_requested,
+        "fallback_used": bool(contexts_with_results) and not found_in_requested if requested_level else False,
+        "requested_level": requested_level,
+    }
 
 
 def _search_with_hierarchy(
@@ -154,76 +480,18 @@ def _search_with_hierarchy(
 ) -> tuple[list, list[str]]:
     """
     Busca em múltiplos contextos respeitando hierarquia legal.
-
-    Hierarquia:
-    1º codigo_civil (Lei 10.406/2002) - SUPERIOR
-    2º lei_condominios (Lei 4.591/64)
-    3º contexto do condomínio (convenção, regimento, atas)
-
-    Args:
-        question: Pergunta do usuário
-        condo_context: Contexto do condomínio (ex: cond_0388)
-        embedding_provider: Provedor de embeddings
-        top_k_per_context: Número de chunks por contexto
+    (Mantido para compatibilidade - usa nova função internamente)
 
     Returns:
         Tuple de (documentos combinados, contextos encontrados)
     """
-    cm = _get_context_manager()
-    available_contexts = cm.list_contexts()
-
-    # Lista de contextos na ordem hierárquica
-    contexts_to_search = LEGAL_HIERARCHY_CONTEXTS + [condo_context]
-
-    all_documents = []
-    contexts_found = []
-
-    # Cria embeddings manager uma vez
-    embeddings_manager = EmbeddingsManager.from_config(
-        config_path="config.toml",
-        override_provider=embedding_provider,
+    result = _search_with_cascade(
+        question=question,
+        condo_context=condo_context,
+        embedding_provider=embedding_provider,
+        top_k_per_context=top_k_per_context,
     )
-
-    for ctx in contexts_to_search:
-        if ctx not in available_contexts:
-            continue
-
-        try:
-            # Cria vector store para este contexto
-            vector_store = VectorStore(
-                embeddings=embeddings_manager.embeddings,
-                context_name=ctx,
-            )
-            vector_store.load()
-
-            # Busca documentos relevantes
-            docs = vector_store.search_documents(
-                query=question,
-                top_k=top_k_per_context,
-            )
-
-            # Adiciona metadado de hierarquia
-            hierarchy_level = contexts_to_search.index(ctx) + 1
-            hierarchy_names = {
-                "codigo_civil": "Código Civil (Lei 10.406/2002)",
-                "lei_condominios": "Lei de Condomínios (Lei 4.591/64)",
-            }
-
-            for doc in docs:
-                doc.metadata["hierarchy_level"] = hierarchy_level
-                doc.metadata["hierarchy_context"] = ctx
-                doc.metadata["hierarchy_name"] = hierarchy_names.get(ctx, f"Documentos do {ctx}")
-
-            all_documents.extend(docs)
-            contexts_found.append(ctx)
-
-        except FileNotFoundError:
-            # Contexto existe mas não tem índice
-            continue
-        except Exception:
-            continue
-
-    return all_documents, contexts_found
+    return result["documents"], result["contexts_with_results"]
 
 
 def _build_rag_chain(
@@ -387,16 +655,18 @@ def query(req: QueryRequest):
 @app.post("/api/query/hierarchical", response_model=HierarchicalQueryResponse, tags=["Query"])
 def query_hierarchical(req: HierarchicalQueryRequest):
     """
-    Executa consulta com hierarquia legal (recomendado para questões condominiais).
+    Executa consulta com hierarquia legal, histórico de conversa e perfis de acesso.
 
     Busca automaticamente em múltiplos contextos respeitando a hierarquia:
     1️⃣ **Código Civil** (Lei 10.406/2002) - Norma suprema
     2️⃣ **Lei de Condomínios** (Lei 4.591/64) - Segunda na hierarquia
     3️⃣ **Documentos do Condomínio** (Convenção, Regimento, Atas)
 
-    - **question**: Pergunta do usuário
-    - **context**: Contexto do condomínio (ex: cond_0388)
-    - **top_k_per_context**: Chunks por contexto (padrão: 3)
+    Recursos:
+    - **Hierarquia Legal**: Busca em ordem de precedência
+    - **Histórico de Conversa**: Contexto de mensagens anteriores
+    - **Perfis de Acesso**: Controle de quais documentos o usuário pode ver
+    - **Nível Específico**: Pode solicitar resposta de um nível específico (ex: só convenção)
     """
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Pergunta vazia.")
@@ -415,98 +685,167 @@ def query_hierarchical(req: HierarchicalQueryRequest):
         )
 
     try:
-        # Busca em múltiplos contextos com hierarquia
-        documents, contexts_found = _search_with_hierarchy(
+        # 1. Inicializa GovernanceManager
+        governance = GovernanceManager(config_path="config.toml")
+
+        # 2. Determina perfil do usuário
+        user_profile = governance.get_user_profile(
+            user_id=req.user_id,
+            is_authenticated=req.is_authenticated,
+            is_admin=req.is_admin,
+        )
+
+        # 3. Valida contextos permitidos
+        allowed_contexts = governance.get_allowed_contexts(
+            requested_context=req.context,
+            profile=user_profile,
+        )
+
+        if not allowed_contexts:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Acesso negado ao contexto '{req.context}' para perfil '{user_profile.value}'."
+            )
+
+        # 4. Se anônimo, prepara prompt anônimo para contextualizar
+        is_anonymous = user_profile == UserProfile.ANONYMOUS
+        anonymous_context = ""
+        if is_anonymous:
+            anonymous_context = get_anonymous_prompt(
+                context_name=req.context,
+            )
+
+        # 5. Processa histórico de conversa
+        conversation_history_text = ""
+        if req.conversation_history:
+            # Usa histórico do request
+            history_parts = []
+            for msg in req.conversation_history:
+                role_label = "USUÁRIO" if msg.role == "user" else "ASSISTENTE"
+                history_parts.append(f"**{role_label}**: {msg.content}")
+            conversation_history_text = "\n".join(history_parts)
+
+        elif req.conversation_id:
+            # Busca histórico do chatbot externo
+            conv_manager = ConversationManager.from_governance(governance)
+            messages = conv_manager.fetch_conversation_history_sync(req.conversation_id)
+            if messages:
+                conversation_history_text = conv_manager.format_history_for_prompt(messages)
+
+        # 5. Busca em CASCATA respeitando hierarquia
+        search_result = _search_with_cascade(
             question=req.question,
             condo_context=req.context,
             embedding_provider=req.embedding_provider,
             top_k_per_context=req.top_k_per_context,
+            requested_level=req.hierarchy_level,
+            strict_hierarchy=req.strict_hierarchy,
         )
 
-        if not documents:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Nenhum documento encontrado nos contextos: {LEGAL_HIERARCHY_CONTEXTS + [req.context]}. Verifique se os contextos existem e estão indexados."
-            )
+        documents = search_result["documents"]
+        contexts_with_results = search_result["contexts_with_results"]
+        found_in_requested = search_result["found_in_requested"]
+        fallback_used = search_result["fallback_used"]
 
-        # Cria embeddings manager para RAG chain
+        # 6. Monta mensagem de not_found apropriada
+        if not documents:
+            # Não encontrou NADA em nenhum nível da hierarquia
+            not_found_msg = "Não encontrei informações sobre este assunto em nenhum dos documentos disponíveis."
+            if req.hierarchy_level:
+                level_name = governance.get_hierarchy_level_name(req.hierarchy_level)
+                not_found_msg = f"Não encontrei informações sobre este assunto na {level_name}, nem em outros documentos da hierarquia."
+
+            return {
+                "answer": not_found_msg,
+                "sources": [],
+                "contexts_searched": search_result["contexts_searched"],
+                "contexts_with_results": [],
+                "hierarchy_applied": True,
+                "hierarchy_level": req.hierarchy_level,
+                "found_in_requested_level": False,
+                "fallback_used": False,
+                "user_profile": user_profile.value,
+                "llm_provider": req.llm_provider,
+                "embedding_provider": req.embedding_provider,
+                "context_format": "hierarchical",
+                "conversation_id": req.conversation_id,
+            }
+
+        # 7. Prepara mensagem de fallback se necessário
+        fallback_notice = ""
+        if req.hierarchy_level and fallback_used and governance.should_include_fallback_notice():
+            level_name = governance.get_hierarchy_level_name(req.hierarchy_level)
+            found_in_names = [HIERARCHY_NAMES.get(ctx, ctx) for ctx in contexts_with_results]
+            fallback_notice = f"Não encontrei informações específicas na {level_name}, mas encontrei conteúdo relevante em: {', '.join(found_in_names)}."
+
+        # 8. Cria RAGChain e gera resposta
         embeddings_manager = EmbeddingsManager.from_config(
             config_path="config.toml",
             override_provider=req.embedding_provider,
         )
 
-        # Cria vector store temporário com documentos combinados
-        from .toon_formatter import ToonFormatter
-        toon_formatter = ToonFormatter(use_toon=True)
+        vector_store = VectorStore(
+            embeddings=embeddings_manager.embeddings,
+            context_name="temp_hierarchical",
+        )
 
-        # Formata contexto com indicação de hierarquia
-        context_parts = []
-        for doc in documents:
-            hierarchy_name = doc.metadata.get("hierarchy_name", "Documento")
-            level = doc.metadata.get("hierarchy_level", 0)
-            source = doc.metadata.get("source", "unknown")
+        rag_chain = RAGChain.from_config(
+            vector_store=vector_store,
+            config_path="config.toml",
+            llm_provider=req.llm_provider,
+            context_name=req.context,
+        )
 
-            # Adiciona marcador de hierarquia
-            hierarchy_marker = "⚖️" if level <= 2 else "📄"
-            context_parts.append(
-                f"{hierarchy_marker} [{hierarchy_name}] (Fonte: {source})\n{doc.page_content}"
-            )
+        # 9. Combina contexto anônimo + histórico para o LLM
+        combined_history = ""
+        if anonymous_context:
+            combined_history = anonymous_context
+        if conversation_history_text:
+            combined_history = f"{combined_history}\n{conversation_history_text}" if combined_history else conversation_history_text
 
-        combined_context = "\n\n" + "─" * 50 + "\n\n".join(context_parts)
+        # 10. Gera resposta baseado no modo (fluent ou técnico)
+        not_found_msg = governance.get_not_found_message(req.hierarchy_level)
 
-        # Cria LLM
-        import os
-        if req.llm_provider == "openai":
-            from langchain_openai import ChatOpenAI
-            llm = ChatOpenAI(
-                model="gpt-4o",
-                temperature=0.3,
-                max_tokens=4096,
-                api_key=os.getenv("OPENAI_API_KEY"),
+        if req.fluent_mode:
+            # Modo fluido: resposta amigável sem jargões técnicos
+            result = rag_chain.query_fluent(
+                question=req.question,
+                documents=documents,
+                conversation_history=combined_history if combined_history else None,
+                show_source=req.show_source,
+                not_found_message=not_found_msg,
+                return_sources=req.return_sources,
             )
         else:
-            from langchain_anthropic import ChatAnthropic
-            llm = ChatAnthropic(
-                model="claude-sonnet-4-20250514",
-                temperature=0.3,
-                max_tokens=4096,
-                api_key=os.getenv("ANTHROPIC_API_KEY"),
+            # Modo técnico: menciona hierarquia legal
+            result = rag_chain.query_with_history(
+                question=req.question,
+                documents=documents,
+                conversation_history=combined_history if combined_history else None,
+                not_found_message=not_found_msg,
+                return_sources=req.return_sources,
             )
 
-        # Usa o prompt do RAGChain com hierarquia
-        from langchain_core.prompts import ChatPromptTemplate
-        from langchain_core.output_parsers import StrOutputParser
+        # 11. Adiciona aviso de fallback se necessário
+        answer = result["answer"]
+        if fallback_notice and not req.fluent_mode:
+            answer = f"{fallback_notice}\n\n{answer}"
 
-        prompt = ChatPromptTemplate.from_template(RAGChain.DEFAULT_PROMPT_TEMPLATE)
-        chain = prompt | llm | StrOutputParser()
-
-        response = chain.invoke({
-            "context": combined_context,
-            "question": req.question,
-        })
-
-        # Prepara fontes com informação de hierarquia
-        sources = None
-        if req.return_sources:
-            sources = [
-                {
-                    "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
-                    "file": doc.metadata.get("source", "unknown"),
-                    "hierarchy_context": doc.metadata.get("hierarchy_context", "unknown"),
-                    "hierarchy_name": doc.metadata.get("hierarchy_name", "Documento"),
-                    "hierarchy_level": doc.metadata.get("hierarchy_level", 0),
-                }
-                for doc in documents
-            ]
-
+        # 12. Prepara resposta final
         return {
-            "answer": response,
-            "sources": sources,
-            "contexts_searched": contexts_found,
+            "answer": answer,
+            "sources": result.get("sources") if req.return_sources else None,
+            "contexts_searched": search_result["contexts_searched"],
+            "contexts_with_results": contexts_with_results,
             "hierarchy_applied": True,
+            "hierarchy_level": req.hierarchy_level,
+            "found_in_requested_level": found_in_requested,
+            "fallback_used": fallback_used,
+            "user_profile": user_profile.value,
             "llm_provider": req.llm_provider,
             "embedding_provider": req.embedding_provider,
-            "context_format": "toon",
+            "context_format": result.get("context_format", "hierarchical"),
+            "conversation_id": req.conversation_id,
         }
 
     except HTTPException:
@@ -523,6 +862,7 @@ async def index_documents(
     files: List[UploadFile] = File(..., description="Arquivos para indexar"),
     context: str = Form("default", description="Nome do contexto"),
     embedding_provider: str = Form("ollama", description="Provedor de embeddings (ollama, openai)"),
+    hierarchy_level: str = Form(None, description="Nível hierárquico: convencao, regimento_interno, ata_assembleia, avisos"),
 ):
     """
     Indexa documentos em um contexto específico.
@@ -530,6 +870,7 @@ async def index_documents(
     - **files**: Arquivos para indexar (PDF, DOCX, XLSX, TXT, MD)
     - **context**: Nome do contexto (padrão: "default")
     - **embedding_provider**: Provedor de embeddings (ollama, openai)
+    - **hierarchy_level**: Nível na hierarquia legal (opcional): convencao, regimento_interno, ata_assembleia, avisos
     """
     if not files:
         raise HTTPException(status_code=400, detail="Nenhum arquivo fornecido.")
@@ -565,14 +906,22 @@ async def index_documents(
         all_documents = []
         file_names = []
 
+        # Determina metadados de hierarquia baseado no contexto
+        hierarchy_metadata = _get_hierarchy_metadata(context, hierarchy_level)
+
         for file_path in saved_files:
             docs = loader.load(file_path)
+
+            # Adiciona metadados de hierarquia a cada documento
+            for doc in docs:
+                doc.metadata.update(hierarchy_metadata)
+
             all_documents.extend(docs)
             file_names.append(Path(file_path).name)
 
         # Chunking
         chunker = Chunker.from_config("config.toml")
-        chunks = chunker.split_documents(all_documents)
+        chunks = chunker.split(all_documents)
 
         # Cria embeddings manager
         embeddings_manager = EmbeddingsManager.from_config(
@@ -961,6 +1310,91 @@ def get_verification_sessions():
     return {
         "active_sessions": verification_engine.session_manager.get_active_sessions(),
         "session_ids": verification_engine.session_manager.list_sessions()
+    }
+
+
+# ==================== ADMIN ENDPOINTS ====================
+
+class AnonymousPromptRequest(BaseModel):
+    """Requisição para atualizar prompt anônimo."""
+    prompt: str = Field(..., description="Template do prompt. Variáveis: {context_name}, {context_label}, {available_contexts}")
+
+
+@app.get("/api/admin/rag/anonymous-prompt", tags=["Admin"])
+def get_anonymous_prompt_config():
+    """
+    Obtém o prompt anônimo atual e preview do padrão.
+
+    Retorna:
+    - **current_prompt**: Prompt customizado (ou vazio se usa padrão)
+    - **default_prompt**: Prompt padrão do sistema
+    - **using_default**: Se está usando o padrão
+    - **preview**: Preview do prompt com valores de exemplo
+    """
+    config = _load_rag_config()
+    custom_prompt = config.get("anonymous_prompt", "")
+
+    # Gera preview
+    preview = get_anonymous_prompt(
+        context_name="zangari_website",
+    )
+
+    return {
+        "current_prompt": custom_prompt,
+        "default_prompt": DEFAULT_ANONYMOUS_PROMPT,
+        "using_default": not bool(custom_prompt),
+        "available_variables": ["{context_name}", "{context_label}", "{available_contexts}"],
+        "preview": preview,
+    }
+
+
+@app.put("/api/admin/rag/anonymous-prompt", tags=["Admin"])
+def update_anonymous_prompt(req: AnonymousPromptRequest):
+    """
+    Define prompt customizado para usuários anônimos.
+
+    Variáveis disponíveis no template:
+    - **{context_name}**: Nome técnico do contexto (ex: lei_condominios)
+    - **{context_label}**: Nome amigável (ex: Lei de Condomínios)
+    - **{available_contexts}**: Lista dos contextos públicos disponíveis
+    """
+    # Valida que o template é formatável
+    try:
+        req.prompt.format(
+            context_name="test",
+            context_label="Test",
+            available_contexts="- Test (test)",
+        )
+    except KeyError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Variável inválida no template: {e}. Use apenas: {{context_name}}, {{context_label}}, {{available_contexts}}"
+        )
+
+    config = _load_rag_config()
+    config["anonymous_prompt"] = req.prompt
+    _save_rag_config(config)
+
+    return {
+        "status": "success",
+        "message": "Prompt anônimo atualizado com sucesso",
+        "preview": get_anonymous_prompt(context_name="zangari_website"),
+    }
+
+
+@app.delete("/api/admin/rag/anonymous-prompt", tags=["Admin"])
+def reset_anonymous_prompt():
+    """
+    Reseta o prompt anônimo para o padrão do sistema.
+    """
+    config = _load_rag_config()
+    config.pop("anonymous_prompt", None)
+    _save_rag_config(config)
+
+    return {
+        "status": "success",
+        "message": "Prompt anônimo resetado para o padrão",
+        "default_prompt": DEFAULT_ANONYMOUS_PROMPT,
     }
 
 

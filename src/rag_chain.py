@@ -1,7 +1,8 @@
 """RAG Chain - Pipeline principal de Retrieval-Augmented Generation."""
 
 import os
-from typing import List, Optional, Literal
+import logging
+from typing import List, Optional, Literal, Dict, Any
 
 import toml
 from langchain_core.documents import Document
@@ -13,6 +14,7 @@ from langchain_anthropic import ChatAnthropic
 from .vector_store import VectorStore
 from .toon_formatter import ToonFormatter
 
+logger = logging.getLogger(__name__)
 
 LLMProvider = Literal["openai", "anthropic"]
 
@@ -76,6 +78,101 @@ INSTRUÇÕES PARA RESPONDER:
 8. **QUANDO NÃO HOUVER INFORMAÇÃO** - Apenas se realmente NÃO existir NENHUMA informação relevante no contexto, informe educadamente. Mas sempre tente ajudar com o que está disponível antes de desistir.
 
 IMPORTANTE: Responda em português brasileiro. Seja didático e acessível.
+
+RESPOSTA:"""
+
+    # Template com histórico de conversa (modo técnico)
+    PROMPT_WITH_HISTORY_TEMPLATE = """Você é um assistente jurídico especializado em direito condominial brasileiro.
+
+{conversation_history}
+
+═══════════════════════════════════════════════════════════════
+⚖️ HIERARQUIA DAS NORMAS CONDOMINIAIS (ORDEM DE PREVALÊNCIA):
+═══════════════════════════════════════════════════════════════
+
+Se houver conflito entre normas, a de hierarquia SUPERIOR sempre prevalece:
+1️⃣ CÓDIGO CIVIL (Lei 10.406/2002) - Norma suprema
+2️⃣ LEI DE CONDOMÍNIOS (Lei 4.591/64)
+3️⃣ CONVENÇÃO DO CONDOMÍNIO
+4️⃣ REGIMENTO INTERNO
+5️⃣ DECISÕES DE ASSEMBLEIA
+
+═══════════════════════════════════════════════════════════════
+DOCUMENTOS ENCONTRADOS:
+═══════════════════════════════════════════════════════════════
+{context}
+═══════════════════════════════════════════════════════════════
+
+PERGUNTA: {question}
+
+═══════════════════════════════════════════════════════════════
+INSTRUÇÕES:
+═══════════════════════════════════════════════════════════════
+
+1. **USE APENAS OS DOCUMENTOS FORNECIDOS** - Responda com base APENAS nos documentos acima. NÃO mencione documentos que não foram fornecidos.
+
+2. **CITE AS FONTES DISPONÍVEIS** - Mencione de qual documento veio cada informação:
+   - "De acordo com o Código Civil..."
+   - "A Lei de Condomínios estabelece que..."
+   - "A Convenção prevê..."
+   - "O Regimento Interno determina..."
+
+3. **SE HOUVER CONFLITO** - Se identificar conflito entre normas nos documentos fornecidos, explique qual prevalece.
+
+4. **SEJA OBJETIVO** - Vá direto ao ponto, apresente as informações relevantes e conclua.
+
+5. **CONCLUSÃO** - Termine com uma conclusão clara sobre a resposta.
+
+6. **QUANDO NÃO HOUVER INFORMAÇÃO** - Se os documentos fornecidos não contêm informação suficiente: "{not_found_message}"
+
+IMPORTANTE: NÃO mencione que "não encontrou no Código Civil" ou em qualquer outro documento que não foi fornecido. Foque apenas no que está disponível.
+
+RESPOSTA:"""
+
+    # ═══════════════════════════════════════════════════════════════
+    # PROMPT FLUIDO - Resposta clara sem mencionar hierarquia técnica
+    # ═══════════════════════════════════════════════════════════════
+
+    FLUENT_PROMPT_TEMPLATE = """Você é um assistente prestativo do Grupo Zangari.
+
+{conversation_history}
+
+DOCUMENTOS ENCONTRADOS:
+{context}
+
+PERGUNTA: {question}
+
+INSTRUÇÕES IMPORTANTES:
+1. Responda de forma clara, direta e amigável
+2. Use APENAS as informações dos documentos fornecidos acima
+3. NÃO mencione termos técnicos como "hierarquia", "precedência", "norma superior"
+4. NÃO mencione documentos que NÃO foram fornecidos - foque apenas no que está disponível
+5. Se os documentos não contêm informação suficiente para responder, diga: "{not_found_message}"
+6. Seja conciso mas completo
+7. Termine com uma conclusão clara e objetiva
+
+RESPOSTA:"""
+
+    FLUENT_WITH_SOURCE_PROMPT_TEMPLATE = """Você é um assistente prestativo do Grupo Zangari.
+
+{conversation_history}
+
+DOCUMENTOS ENCONTRADOS:
+{context}
+
+PERGUNTA: {question}
+
+INSTRUÇÕES IMPORTANTES:
+1. Responda de forma clara e amigável
+2. Use APENAS as informações dos documentos fornecidos acima
+3. MENCIONE A FONTE de forma natural ao citar informações:
+   - "De acordo com a convenção do seu condomínio..."
+   - "Conforme o regimento interno..."
+   - "A Lei de Condomínios estabelece que..."
+   - "O Código Civil prevê que..."
+4. NÃO mencione documentos que NÃO foram fornecidos - cite apenas os que estão disponíveis
+5. Se os documentos não contêm informação suficiente, diga: "{not_found_message}"
+6. Termine com uma conclusão clara e objetiva
 
 RESPOSTA:"""
 
@@ -241,6 +338,207 @@ RESPOSTA:"""
             ]
 
         return result
+
+    def query_with_history(
+        self,
+        question: str,
+        documents: List[Document],
+        conversation_history: Optional[str] = None,
+        not_found_message: str = "Não encontrei informações sobre este assunto nos documentos disponíveis.",
+        return_sources: bool = True,
+    ) -> dict:
+        """
+        Executa query com histórico de conversa e documentos pré-recuperados.
+
+        Este método é usado quando os documentos já foram recuperados de múltiplos
+        contextos (hierarquia legal) e precisamos gerar a resposta com contexto
+        de conversa.
+
+        Args:
+            question: Pergunta do usuário
+            documents: Lista de documentos já recuperados
+            conversation_history: Histórico formatado da conversa
+            not_found_message: Mensagem quando não encontra resposta
+            return_sources: Se True, retorna fontes
+
+        Returns:
+            Dicionário com resposta e metadados
+        """
+        # Formata contexto dos documentos
+        context = self._format_documents_with_hierarchy(documents)
+
+        # Prepara histórico
+        history_text = ""
+        if conversation_history:
+            history_text = f"## Histórico da Conversa\n{conversation_history}\n---\n"
+
+        # Usa o prompt com histórico
+        prompt = ChatPromptTemplate.from_template(self.PROMPT_WITH_HISTORY_TEMPLATE)
+        chain = prompt | self._llm | self._output_parser
+
+        response = chain.invoke({
+            "conversation_history": history_text,
+            "context": context,
+            "question": question,
+            "not_found_message": not_found_message,
+        })
+
+        result = {
+            "answer": response,
+            "llm_provider": self.llm_provider,
+            "context_format": "hierarchical",
+        }
+
+        if return_sources:
+            result["sources"] = [
+                {
+                    "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                    "file": doc.metadata.get("source", "unknown"),
+                    "hierarchy_context": doc.metadata.get("hierarchy_context", "unknown"),
+                    "hierarchy_name": doc.metadata.get("hierarchy_name", "Documento"),
+                    "hierarchy_level": doc.metadata.get("hierarchy_level", 0),
+                }
+                for doc in documents
+            ]
+
+        return result
+
+    def query_fluent(
+        self,
+        question: str,
+        documents: List[Document],
+        conversation_history: Optional[str] = None,
+        show_source: bool = False,
+        not_found_message: str = "Não encontrei informações sobre este assunto nos documentos disponíveis.",
+        return_sources: bool = True,
+    ) -> dict:
+        """
+        Executa query com resposta FLUIDA (sem mencionar hierarquia técnica).
+
+        Este é o método recomendado para respostas ao usuário final.
+        A resposta é clara e direta, sem termos técnicos.
+
+        Args:
+            question: Pergunta do usuário
+            documents: Lista de documentos já recuperados
+            conversation_history: Histórico formatado da conversa
+            show_source: Se True, menciona a fonte NA RESPOSTA (ex: "De acordo com...")
+            not_found_message: Mensagem quando não encontra resposta
+            return_sources: Se True, retorna fontes no JSON
+
+        Returns:
+            Dicionário com resposta e metadados
+        """
+        if not documents:
+            return {
+                "answer": not_found_message,
+                "llm_provider": self.llm_provider,
+                "context_format": "fluent",
+                "sources": [] if return_sources else None,
+            }
+
+        # Formata contexto dos documentos (simplificado para resposta fluida)
+        context = self._format_documents_simple(documents)
+
+        # Prepara histórico
+        history_text = ""
+        if conversation_history:
+            history_text = f"Contexto da conversa anterior:\n{conversation_history}\n---\n"
+
+        # Escolhe prompt baseado em show_source
+        if show_source:
+            prompt_template = self.FLUENT_WITH_SOURCE_PROMPT_TEMPLATE
+        else:
+            prompt_template = self.FLUENT_PROMPT_TEMPLATE
+
+        prompt = ChatPromptTemplate.from_template(prompt_template)
+        chain = prompt | self._llm | self._output_parser
+
+        response = chain.invoke({
+            "conversation_history": history_text,
+            "context": context,
+            "question": question,
+            "not_found_message": not_found_message,
+        })
+
+        result = {
+            "answer": response,
+            "llm_provider": self.llm_provider,
+            "context_format": "fluent",
+            "show_source": show_source,
+        }
+
+        if return_sources:
+            result["sources"] = [
+                {
+                    "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                    "file": doc.metadata.get("source", "unknown"),
+                    "hierarchy_context": doc.metadata.get("hierarchy_context", "unknown"),
+                    "hierarchy_name": doc.metadata.get("hierarchy_name", "Documento"),
+                    "hierarchy_level": doc.metadata.get("hierarchy_level", 0),
+                }
+                for doc in documents
+            ]
+
+        return result
+
+    def _format_documents_simple(self, documents: List[Document]) -> str:
+        """
+        Formata documentos de forma simples (sem marcadores de hierarquia).
+
+        Args:
+            documents: Lista de documentos
+
+        Returns:
+            String formatada com conteúdo dos documentos
+        """
+        if not documents:
+            return "Nenhum documento encontrado."
+
+        formatted_parts = []
+        for doc in documents:
+            source = doc.metadata.get("source", "documento")
+            formatted_parts.append(f"[{source}]\n{doc.page_content}")
+
+        return "\n\n---\n\n".join(formatted_parts)
+
+    def _format_documents_with_hierarchy(self, documents: List[Document]) -> str:
+        """
+        Formata documentos com indicação de hierarquia.
+
+        Args:
+            documents: Lista de documentos com metadados de hierarquia
+
+        Returns:
+            String formatada com indicação de nível hierárquico
+        """
+        if not documents:
+            return "Nenhum documento relevante encontrado."
+
+        # Agrupa por nível hierárquico
+        by_level: Dict[int, List[Document]] = {}
+        for doc in documents:
+            level = doc.metadata.get("hierarchy_level", 99)
+            if level not in by_level:
+                by_level[level] = []
+            by_level[level].append(doc)
+
+        # Formata em ordem de hierarquia
+        formatted_parts = []
+        for level in sorted(by_level.keys()):
+            docs = by_level[level]
+            if docs:
+                hierarchy_name = docs[0].metadata.get("hierarchy_name", f"Nível {level}")
+
+                # Emoji baseado no nível
+                emoji = "⚖️" if level <= 2 else "📄"
+                formatted_parts.append(f"\n{emoji} **{hierarchy_name}**:")
+
+                for doc in docs:
+                    source = doc.metadata.get("source", "unknown")
+                    formatted_parts.append(f"  [{source}] {doc.page_content}")
+
+        return "\n".join(formatted_parts)
 
     def query_with_scores(
         self,

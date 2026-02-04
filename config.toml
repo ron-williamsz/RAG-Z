@@ -75,3 +75,82 @@ llm_candidate_threshold = 0.70
 # Número máximo de pares por chamada batch ao LLM
 # Valores maiores = menos chamadas, mas respostas mais longas
 llm_batch_size = 10
+
+# ═══════════════════════════════════════════════════════════════
+# GOVERNANÇA - Hierarquia de Documentos + Perfis + Conversas
+# ═══════════════════════════════════════════════════════════════
+
+[governance]
+# Hierarquia de documentos (ordem de precedência legal)
+# 1º = Maior autoridade, último = menor autoridade
+document_hierarchy = [
+    "codigo_civil",
+    "lei_condominios",
+    "convencao",
+    "regimento_interno",
+    "ata_assembleia",
+    "avisos"
+]
+
+# Hierarquia para usuários PÚBLICOS (site Zangari, visitantes)
+# Prioriza conteúdo institucional, FAQ e legislação geral
+document_hierarchy_global = [
+    "zangari_website",
+    "zangari_faq",
+    "codigo_civil",
+    "lei_condominios"
+]
+
+# Hierarquia para usuários de CONDOMÍNIO (autenticados)
+# Prioriza documentos específicos do condomínio
+document_hierarchy_condominio = [
+    "convencao",
+    "regimento_interno",
+    "lei_condominios",
+    "codigo_civil",
+    "ata_assembleia",
+    "avisos"
+]
+
+# Regras de resposta quando não encontra informação
+[governance.rules]
+not_found_message = "Não encontrei informações sobre este assunto nos documentos disponíveis."
+hierarchy_not_found_message = "Não encontrei na {requested_level}. {fallback_message}"
+# Se deve mostrar fontes de outros níveis quando não encontra no pedido
+include_fallback_sources = true
+# Se deve avisar quando usa fonte de outro nível hierárquico
+include_fallback_notice = true
+
+# Perfis de acesso
+[governance.profiles.anonymous]
+contexts = ["*"]  # "*" = acesso a todos os contextos públicos
+max_sources = 3
+response_template = "short"
+can_access_private = false
+
+[governance.profiles.authenticated]
+contexts = ["*"]
+max_sources = 8
+response_template = "detailed"
+can_access_private = false
+
+[governance.profiles.admin]
+contexts = ["*"]
+max_sources = 20
+response_template = "full"
+can_access_private = true
+
+# Mapeamento de contextos (público/privado)
+# Formato: "contexto_solicitado" = "contexto_real"
+[governance.context_mapping]
+# Exemplo: cond_391_public = "cond_391_docs_publicos"
+# Exemplo: cond_391_private = "cond_391_completo"
+
+# Configuração de histórico de conversa (integração com chatbot_new)
+[governance.conversation]
+enable_history = true
+max_history_messages = 10
+# URL da API do chatbot para buscar histórico (deixe vazio para desabilitar)
+# Formato esperado: GET {fetch_from_api}/{conversation_id}/messages
+fetch_from_api = ""
+# fetch_from_api = "http://192.168.0.76:8011/api/conversations"
