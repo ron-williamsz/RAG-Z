@@ -16,6 +16,18 @@ build/
 venv/
 env/
 ENV/
+*.env
+.env.*
+
+# Credenciais e contas de serviço
+service_account.json
+service-account.json
+service_account_*.json
+service-account_*.json
+credentials.json
+*.key
+*.pem
+.credentials
 
 # Dados - Não versionar índices e documentos
 data/documents/*
