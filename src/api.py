@@ -1134,6 +1134,173 @@ def get_context_stats(context_name: str):
         )
 
 
+# ==================== EXPORT / IMPORT ENDPOINTS ====================
+
+
+class ImportRequest(BaseModel):
+    """Modelo de requisição para importação de contexto."""
+    context_name: str = Field(..., description="Nome do contexto a criar/atualizar")
+    description: str = Field("", description="Descrição do contexto")
+    documents: List[Dict[str, Any]] = Field(..., description="Lista de documentos (page_content + metadata)")
+    embedding_provider: str = Field("ollama", description="Provedor de embeddings para re-indexar")
+
+
+@app.get("/api/contexts/{context_name}/export", tags=["Export/Import"])
+def export_context(context_name: str):
+    """
+    Exporta todos os documentos (texto + metadata) de um contexto como JSON.
+
+    Use para migrar dados entre máquinas ou ambientes (local → nuvem).
+    O JSON exportado é independente de modelo de embedding e pode ser
+    re-indexado em qualquer instância com POST /api/contexts/{nome}/import.
+
+    - **context_name**: Nome do contexto a exportar
+    """
+    try:
+        cm = _get_context_manager()
+
+        if context_name not in cm.list_contexts():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Contexto '{context_name}' não encontrado."
+            )
+
+        if not cm.has_index(context_name):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Contexto '{context_name}' não possui índice FAISS."
+            )
+
+        # Carrega o índice com embeddings dummy apenas para ler os documentos
+        # Precisamos de qualquer embedding para instanciar o FAISS, mas não vamos
+        # gerar novos embeddings - apenas ler o docstore
+        embeddings_manager = EmbeddingsManager.from_config(config_path="config.toml")
+        vector_store = VectorStore(
+            embeddings=embeddings_manager.embeddings,
+            context_name=context_name,
+        )
+        vector_store.load()
+
+        # Extrai todos os documentos do docstore do FAISS
+        docstore = vector_store._vectorstore.docstore._dict
+        documents = []
+        for doc_id, doc in docstore.items():
+            documents.append({
+                "page_content": doc.page_content,
+                "metadata": doc.metadata,
+            })
+
+        # Metadados do contexto
+        context_metadata = cm.get_context_metadata(context_name)
+
+        return {
+            "status": "success",
+            "context_name": context_name,
+            "context_metadata": context_metadata,
+            "total_documents": len(documents),
+            "documents": documents,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao exportar contexto: {str(e)}"
+        )
+
+
+@app.post("/api/contexts/{context_name}/import", tags=["Export/Import"])
+def import_context(context_name: str, req: ImportRequest):
+    """
+    Importa documentos e re-indexa em um contexto.
+
+    Recebe o JSON exportado por GET /api/contexts/{nome}/export e
+    re-indexa os documentos com o modelo de embedding da máquina local.
+
+    - **context_name**: Nome do contexto destino
+    - **documents**: Lista de documentos (page_content + metadata)
+    - **embedding_provider**: Provedor de embeddings (ollama, openai)
+    """
+    try:
+        from langchain_core.documents import Document
+
+        cm = _get_context_manager()
+
+        # Cria contexto se não existir
+        if context_name not in cm.list_contexts():
+            cm.create_context(context_name, req.description)
+
+        if not req.documents:
+            raise HTTPException(
+                status_code=400,
+                detail="Lista de documentos vazia."
+            )
+
+        # Converte dicts para Documents do LangChain
+        documents = []
+        for doc_data in req.documents:
+            documents.append(
+                Document(
+                    page_content=doc_data["page_content"],
+                    metadata=doc_data.get("metadata", {}),
+                )
+            )
+
+        # Inicializa embeddings da máquina local
+        embeddings_manager = EmbeddingsManager.from_config(
+            config_path="config.toml",
+            override_provider=req.embedding_provider,
+        )
+
+        # Cria o VectorStore e indexa
+        vector_store = VectorStore(
+            embeddings=embeddings_manager.embeddings,
+            context_name=context_name,
+        )
+
+        # Tenta carregar índice existente para merge
+        try:
+            vector_store.load()
+            vector_store.add_documents(documents)
+        except FileNotFoundError:
+            vector_store.create_index(documents)
+
+        # Extrai nomes dos arquivos das metadata dos documentos
+        file_names = list(set(
+            doc.metadata.get("source", "importado")
+            for doc in documents
+        ))
+
+        # Salva índice
+        vector_store.save(file_names=file_names)
+
+        # Atualiza metadados
+        stats = vector_store.get_stats()
+        cm.update_context_metadata(
+            context_name,
+            file_names,
+            stats.get("total_documents", 0),
+        )
+
+        return {
+            "status": "success",
+            "message": f"Contexto '{context_name}' importado com sucesso",
+            "context_name": context_name,
+            "total_documents": len(documents),
+            "files": file_names,
+            "embedding_provider": req.embedding_provider,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao importar contexto: {str(e)}"
+        )
+
+
 # ==================== VERIFICATION ENDPOINTS ====================
 
 @app.post("/api/verify/extract-reference", response_model=ExtractReferenceResponse, tags=["Verification"])
