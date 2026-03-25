@@ -5,6 +5,19 @@
 2. [Instalação e Configuração](#instalação-e-configuração)
 3. [Como Executar](#como-executar)
 4. [Endpoints Disponíveis](#endpoints-disponíveis)
+   - [Root](#1-root)
+   - [Health Check](#2-health-check)
+   - [Consultar (Query)](#3-consultar-query)
+   - [Consulta Hierárquica](#4-consulta-hierárquica)
+   - [Indexar Documentos](#5-indexar-documentos)
+   - [Listar Contextos](#6-listar-contextos)
+   - [Criar Contexto](#7-criar-contexto)
+   - [Deletar Contexto](#8-deletar-contexto)
+   - [Estatísticas de Contexto](#9-estatísticas-de-contexto)
+   - [Verificação - Extrair Referência](#10-verificação---extrair-referência)
+   - [Verificação - Comparar Target](#11-verificação---comparar-target)
+   - [Verificação - Sessões Ativas](#12-verificação---sessões-ativas)
+   - [Admin - Prompt Anônimo](#13-admin---prompt-anônimo)
 5. [Exemplos de Uso](#exemplos-de-uso)
 6. [Integração Docker](#integração-docker)
 7. [Tratamento de Erros](#tratamento-de-erros)
@@ -17,9 +30,14 @@
 A API REST permite integrar o sistema RAG com outras aplicações através de endpoints HTTP. Desenvolvida com **FastAPI**, oferece:
 
 - ✅ **Consultas RAG** - Faça perguntas e receba respostas contextualizadas
-- ✅ **Indexação de documentos** - Upload e indexação via API
+- ✅ **Consulta Hierárquica** - Busca em cascata com hierarquia legal (Código Civil → Lei de Condomínios → Documentos do Condomínio)
+- ✅ **Indexação de documentos** - Upload e indexação via API com suporte a hierarquia legal
 - ✅ **Gerenciamento de contextos** - Crie, liste e delete contextos
+- ✅ **Verificação de documentos** - Motor de verificação com extração de referência e comparação
+- ✅ **Governança e perfis** - Controle de acesso por perfil (anônimo, autenticado, admin)
+- ✅ **Prompt anônimo customizável** - Administração do prompt para usuários anônimos
 - ✅ **Múltiplos provedores** - Escolha LLM e embeddings provider
+- ✅ **Histórico de conversa** - Suporte a contexto conversacional
 - ✅ **Documentação automática** - Swagger UI e ReDoc
 - ✅ **CORS habilitado** - Acesso de qualquer origem
 - ✅ **Validação automática** - Pydantic models
@@ -154,7 +172,25 @@ python app.py
 
 ## Endpoints Disponíveis
 
-### 1. Health Check
+### 1. Root
+
+**GET** `/`
+
+Informações básicas da API.
+
+**Response:**
+```json
+{
+  "name": "RAG API",
+  "version": "1.0.0",
+  "docs": "/docs",
+  "health": "/health"
+}
+```
+
+---
+
+### 2. Health Check
 
 **GET** `/health`
 
@@ -170,13 +206,17 @@ Verifica se a API está funcionando.
 }
 ```
 
+**Códigos de Status:**
+- `200` - Saudável
+- `503` - Serviço indisponível
+
 ---
 
-### 2. Consultar (Query)
+### 3. Consultar (Query)
 
 **POST** `/api/query`
 
-Executa uma consulta no sistema RAG.
+Executa uma consulta simples no sistema RAG (sem hierarquia legal).
 
 **Request Body:**
 ```json
@@ -186,7 +226,18 @@ Executa uma consulta no sistema RAG.
   "llm_provider": "openai",
   "embedding_provider": "ollama",
   "top_k": 8,
-  "return_sources": true
+  "return_sources": true,
+  "use_legal_hierarchy": false,
+  "show_source": false,
+  "fluent_mode": true,
+  "conversation_history": [
+    {"role": "user", "content": "Olá"},
+    {"role": "assistant", "content": "Olá! Como posso ajudar?"}
+  ],
+  "conversation_id": "conv_abc123",
+  "user_id": "user_001",
+  "is_authenticated": true,
+  "is_admin": false
 }
 ```
 
@@ -198,7 +249,15 @@ Executa uma consulta no sistema RAG.
 | `llm_provider` | string | ❌ Não | "openai" | LLM (openai, anthropic) |
 | `embedding_provider` | string | ❌ Não | "ollama" | Embeddings (ollama, openai) |
 | `top_k` | integer | ❌ Não | 8 | Chunks a recuperar (1-20) |
-| `return_sources` | boolean | ❌ Não | true | Retornar fontes |
+| `return_sources` | boolean | ❌ Não | true | Retornar fontes no JSON |
+| `use_legal_hierarchy` | boolean | ❌ Não | false | Usar hierarquia legal |
+| `show_source` | boolean | ❌ Não | false | Mencionar fonte na resposta textual |
+| `fluent_mode` | boolean | ❌ Não | true | Resposta fluida sem jargões técnicos |
+| `conversation_history` | array | ❌ Não | null | Histórico de mensagens `[{role, content}]` |
+| `conversation_id` | string | ❌ Não | null | ID da conversa no chatbot externo |
+| `user_id` | string | ❌ Não | null | ID do usuário |
+| `is_authenticated` | boolean | ❌ Não | false | Se o usuário está autenticado |
+| `is_admin` | boolean | ❌ Não | false | Se o usuário é administrador |
 
 **Response:**
 ```json
@@ -226,18 +285,117 @@ Executa uma consulta no sistema RAG.
 
 ---
 
-### 3. Indexar Documentos
+### 4. Consulta Hierárquica
+
+**POST** `/api/query/hierarchical`
+
+Executa consulta com busca em cascata respeitando a hierarquia legal. É o endpoint principal para integrações com chatbots.
+
+**Hierarquia de busca:**
+1. **Contexto do Condomínio** (convenção, regimento, atas)
+2. **Lei de Condomínios** (Lei 4.591/64)
+3. **Código Civil** (Lei 10.406/2002)
+
+A busca é feita em cascata: busca primeiro no contexto principal e, se não encontrar resultados com score suficiente (>= 0.7), busca nos níveis seguintes da hierarquia.
+
+**Request Body:**
+```json
+{
+  "question": "Posso ter cachorro no condomínio?",
+  "context": "cond_0388",
+  "llm_provider": "openai",
+  "embedding_provider": "ollama",
+  "top_k_per_context": 3,
+  "return_sources": true,
+  "show_source": true,
+  "fluent_mode": true,
+  "hierarchy_level": null,
+  "strict_hierarchy": false,
+  "conversation_history": [
+    {"role": "user", "content": "Quais as regras do condomínio?"},
+    {"role": "assistant", "content": "O condomínio possui regras sobre..."}
+  ],
+  "conversation_id": "conv_abc123",
+  "user_id": "user_001",
+  "is_authenticated": true,
+  "is_admin": false
+}
+```
+
+**Parâmetros:**
+| Campo | Tipo | Obrigatório | Padrão | Descrição |
+|-------|------|------------|--------|-----------|
+| `question` | string | ✅ Sim | - | Pergunta do usuário |
+| `context` | string | ❌ Não | "zangari_website" | Contexto principal (ex: cond_0388, zangari_website) |
+| `llm_provider` | string | ❌ Não | "openai" | LLM (openai, anthropic) |
+| `embedding_provider` | string | ❌ Não | "ollama" | Embeddings (ollama, openai) |
+| `top_k_per_context` | integer | ❌ Não | 3 | Chunks por contexto hierárquico (1-10) |
+| `return_sources` | boolean | ❌ Não | true | Retornar fontes no JSON |
+| `show_source` | boolean | ❌ Não | false | Mencionar fonte na resposta textual (ex: "De acordo com a convenção...") |
+| `fluent_mode` | boolean | ❌ Não | true | Resposta fluida sem hierarquia técnica |
+| `hierarchy_level` | string | ❌ Não | null | Nível específico: convencao, regimento_interno, codigo_civil, lei_condominios, ata_assembleia, avisos |
+| `strict_hierarchy` | boolean | ❌ Não | false | Se true, retorna apenas do nível solicitado |
+| `conversation_history` | array | ❌ Não | null | Histórico de mensagens `[{role, content}]` |
+| `conversation_id` | string | ❌ Não | null | ID da conversa no chatbot externo |
+| `user_id` | string | ❌ Não | null | ID do usuário |
+| `is_authenticated` | boolean | ❌ Não | false | Se o usuário está autenticado |
+| `is_admin` | boolean | ❌ Não | false | Se o usuário é administrador |
+
+**Response:**
+```json
+{
+  "answer": "De acordo com a Convenção do Condomínio, animais de estimação são permitidos...",
+  "sources": [
+    {
+      "content": "Artigo 15 - É permitida a manutenção de animais...",
+      "file": "convencao.pdf",
+      "chunk": "12/50"
+    }
+  ],
+  "contexts_searched": ["cond_0388", "lei_condominios", "codigo_civil"],
+  "contexts_with_results": ["cond_0388"],
+  "hierarchy_applied": true,
+  "hierarchy_level": null,
+  "found_in_requested_level": null,
+  "fallback_used": null,
+  "user_profile": "authenticated",
+  "llm_provider": "openai",
+  "embedding_provider": "ollama",
+  "context_format": "hierarchical",
+  "conversation_id": "conv_abc123"
+}
+```
+
+**Perfis de Acesso (`user_profile`):**
+| Perfil | Descrição |
+|--------|-----------|
+| `anonymous` | Usuário não autenticado - acesso apenas a contextos públicos |
+| `authenticated` | Usuário autenticado - acesso ao condomínio associado |
+| `admin` | Administrador - acesso a todos os contextos |
+
+**Códigos de Status:**
+- `200` - Sucesso
+- `400` - Requisição inválida (pergunta vazia, provider inválido)
+- `403` - Acesso negado ao contexto para o perfil do usuário
+- `500` - Erro interno
+
+---
+
+### 5. Indexar Documentos
 
 **POST** `/api/index`
 
-Faz upload e indexa documentos em um contexto.
+Faz upload e indexa documentos em um contexto. Suporta metadados de hierarquia legal.
 
 **Content-Type:** `multipart/form-data`
 
 **Form Data:**
-- `files`: Arquivo(s) para indexar (PDF, DOCX, XLSX, TXT, MD)
-- `context`: Nome do contexto (padrão: "default")
-- `embedding_provider`: Provedor (padrão: "ollama")
+| Campo | Tipo | Obrigatório | Padrão | Descrição |
+|-------|------|------------|--------|-----------|
+| `files` | file(s) | ✅ Sim | - | Arquivos para indexar (PDF, DOCX, XLSX, TXT, MD) |
+| `context` | string | ❌ Não | "default" | Nome do contexto |
+| `embedding_provider` | string | ❌ Não | "ollama" | Provedor de embeddings (ollama, openai) |
+| `hierarchy_level` | string | ❌ Não | null | Nível hierárquico: convencao, regimento_interno, ata_assembleia, avisos |
 
 **Exemplo com curl:**
 ```bash
@@ -245,7 +403,8 @@ curl -X POST http://localhost:8000/api/index \
   -F "files=@regimento.pdf" \
   -F "files=@ata_assembleia.docx" \
   -F "context=cond_391" \
-  -F "embedding_provider=ollama"
+  -F "embedding_provider=ollama" \
+  -F "hierarchy_level=regimento_interno"
 ```
 
 **Response:**
@@ -267,9 +426,10 @@ curl -X POST http://localhost:8000/api/index \
 
 ---
 
-### 4. Listar Contextos
+### 6. Listar Contextos
 
 **GET** `/api/contexts`
+**Tags:** `Contexts`
 
 Lista todos os contextos disponíveis com estatísticas.
 
@@ -302,9 +462,10 @@ Lista todos os contextos disponíveis com estatísticas.
 
 ---
 
-### 5. Criar Contexto
+### 7. Criar Contexto
 
 **POST** `/api/contexts`
+**Tags:** `Contexts`
 
 Cria um novo contexto vazio.
 
@@ -331,9 +492,10 @@ Cria um novo contexto vazio.
 
 ---
 
-### 6. Deletar Contexto
+### 8. Deletar Contexto
 
 **DELETE** `/api/contexts/{context_name}`
+**Tags:** `Contexts`
 
 Deleta um contexto e todos os seus dados.
 
@@ -363,9 +525,10 @@ curl -X DELETE http://localhost:8000/api/contexts/cond_392
 
 ---
 
-### 7. Estatísticas de Contexto
+### 9. Estatísticas de Contexto
 
 **GET** `/api/contexts/{context_name}/stats`
+**Tags:** `Contexts`
 
 Obtém estatísticas detalhadas de um contexto.
 
@@ -403,6 +566,199 @@ curl http://localhost:8000/api/contexts/cond_391/stats
 - `200` - Sucesso
 - `404` - Contexto não encontrado
 - `500` - Erro interno
+
+---
+
+### 10. Verificação - Extrair Referência
+
+**POST** `/api/verify/extract-reference`
+**Tags:** `Verification`
+
+Etapa 1 do motor de verificação. Extrai entidades de referência de um documento base para posterior comparação.
+
+**Content-Type:** `multipart/form-data`
+
+**Form Data:**
+| Campo | Tipo | Obrigatório | Padrão | Descrição |
+|-------|------|------------|--------|-----------|
+| `file` | file | ✅ Sim | - | Documento base de referência (PDF, DOCX, etc.) |
+| `request_data` | string (JSON) | ✅ Sim | - | JSON com parâmetros de extração |
+
+**Formato do `request_data` (JSON):**
+```json
+{
+  "extraction_query": "lista de nomes de funcionários",
+  "llm_provider": "openai",
+  "session_ttl": 3600
+}
+```
+
+| Campo | Tipo | Obrigatório | Padrão | Descrição |
+|-------|------|------------|--------|-----------|
+| `extraction_query` | string | ✅ Sim | - | Query em linguagem natural (ex: "lista de nomes") |
+| `llm_provider` | string | ❌ Não | "openai" | LLM (openai, anthropic) |
+| `session_ttl` | integer | ❌ Não | 3600 | Tempo de vida da sessão em segundos |
+
+**Response:**
+```json
+{
+  "session_id": "sess_abc123",
+  "entity_type": "employee_names",
+  "entities": ["João Silva", "Maria Santos", "Pedro Oliveira"],
+  "total_entities": 3,
+  "base_document": "lista_funcionarios.pdf",
+  "expires_at": "2024-01-15T11:30:00",
+  "message": "Successfully extracted 3 employee_names"
+}
+```
+
+**Códigos de Status:**
+- `200` - Sucesso
+- `400` - JSON inválido ou dados de requisição inválidos
+- `500` - Erro na extração
+
+---
+
+### 11. Verificação - Comparar Target
+
+**POST** `/api/verify/compare-target`
+**Tags:** `Verification`
+
+Etapa 2 do motor de verificação. Compara documentos alvo contra a sessão de referência criada na etapa 1.
+
+**Content-Type:** `multipart/form-data`
+
+**Form Data:**
+| Campo | Tipo | Obrigatório | Padrão | Descrição |
+|-------|------|------------|--------|-----------|
+| `files` | file(s) | ✅ Sim | - | Documentos alvo para verificar |
+| `session_id` | string | ✅ Sim | - | Session ID da etapa extract-reference |
+| `llm_provider` | string | ❌ Não | "openai" | LLM (openai, anthropic) |
+| `strictness` | float | ❌ Não | 0.7 | Rigidez do match (0.5=tolerante, 1.0=estrito) |
+
+**Response:**
+```json
+{
+  "session_id": "sess_abc123",
+  "results": [
+    {
+      "target_document": "folha_pagamento.pdf",
+      "status": "verified",
+      "overall_confidence": 0.95,
+      "matches": [...],
+      "mismatches": [...]
+    }
+  ],
+  "summary_statistics": {
+    "total_targets": 1,
+    "verified": 1,
+    "partial_match": 0,
+    "mismatch": 0,
+    "average_confidence": 0.95
+  },
+  "message": "Compared 1 target document(s)"
+}
+```
+
+**Códigos de Status:**
+- `200` - Sucesso
+- `400` - Sem arquivos, strictness inválido, ou provider inválido
+- `404` - Sessão não encontrada
+- `500` - Erro na comparação
+
+---
+
+### 12. Verificação - Sessões Ativas
+
+**GET** `/api/verify/sessions`
+**Tags:** `Verification`
+
+Retorna informações sobre sessões de verificação ativas.
+
+**Response:**
+```json
+{
+  "active_sessions": 2,
+  "session_ids": ["sess_abc123", "sess_def456"]
+}
+```
+
+**Códigos de Status:**
+- `200` - Sucesso
+
+---
+
+### 13. Admin - Prompt Anônimo
+
+Endpoints para gerenciar o prompt de sistema usado para usuários anônimos.
+
+#### 13.1 Obter Prompt Anônimo
+
+**GET** `/api/admin/rag/anonymous-prompt`
+**Tags:** `Admin`
+
+Retorna o prompt anônimo atual, o padrão e um preview.
+
+**Response:**
+```json
+{
+  "current_prompt": "",
+  "default_prompt": "Você é o assistente virtual público do Grupo Zangari...",
+  "using_default": true,
+  "available_variables": ["{context_name}", "{context_label}", "{available_contexts}"],
+  "preview": "Você é o assistente virtual público do Grupo Zangari.\n\nCONTEXTO ATIVO: Website Zangari (zangari_website)..."
+}
+```
+
+#### 13.2 Atualizar Prompt Anônimo
+
+**PUT** `/api/admin/rag/anonymous-prompt`
+**Tags:** `Admin`
+
+Define um prompt customizado para usuários anônimos.
+
+**Request Body:**
+```json
+{
+  "prompt": "Você é o assistente do Grupo Zangari.\nCONTEXTO: {context_label} ({context_name})\nCONTEXTOS: {available_contexts}\nResponda apenas com base nos documentos."
+}
+```
+
+**Variáveis disponíveis no template:**
+| Variável | Descrição |
+|----------|-----------|
+| `{context_name}` | Nome técnico do contexto (ex: lei_condominios) |
+| `{context_label}` | Nome amigável (ex: Lei de Condomínios) |
+| `{available_contexts}` | Lista formatada dos contextos públicos disponíveis |
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Prompt anônimo atualizado com sucesso",
+  "preview": "Você é o assistente do Grupo Zangari..."
+}
+```
+
+**Códigos de Status:**
+- `200` - Sucesso
+- `400` - Variável inválida no template
+
+#### 13.3 Resetar Prompt Anônimo
+
+**DELETE** `/api/admin/rag/anonymous-prompt`
+**Tags:** `Admin`
+
+Reseta o prompt anônimo para o padrão do sistema.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Prompt anônimo resetado para o padrão",
+  "default_prompt": "Você é o assistente virtual público do Grupo Zangari..."
+}
+```
 
 ---
 
@@ -860,16 +1216,22 @@ def detailed_health():
 
 ## Próximos Passos
 
-Recursos planejados:
+Recursos implementados:
+- [x] Histórico de conversas
+- [x] Hierarquia legal com busca em cascata
+- [x] Perfis de acesso (anônimo, autenticado, admin)
+- [x] Motor de verificação de documentos
+- [x] Prompt anônimo customizável
 
+Recursos planejados:
 - [ ] Autenticação JWT
 - [ ] Rate limiting
 - [ ] WebSocket para streaming de respostas
-- [ ] Histórico de conversas
 - [ ] Cache de queries frequentes (Redis)
 - [ ] Métricas (Prometheus)
 - [ ] Logs estruturados (JSON)
 - [ ] Swagger UI customizado
+- [ ] Gerenciamento de conversas (criar, listar, snapshots)
 
 ---
 
@@ -877,10 +1239,14 @@ Recursos planejados:
 
 A API REST fornece uma interface completa e profissional para integração do sistema RAG com:
 
-- ✅ Endpoints RESTful bem definidos
+- ✅ Endpoints RESTful bem definidos (15 endpoints)
 - ✅ Validação automática de dados
 - ✅ Documentação interativa (Swagger)
-- ✅ Suporte a múltiplos contextos
+- ✅ Suporte a múltiplos contextos com hierarquia legal
+- ✅ Busca em cascata com score threshold
+- ✅ Perfis de acesso e governança
+- ✅ Motor de verificação de documentos
+- ✅ Histórico de conversa integrado
 - ✅ Flexibilidade de provedores (LLM, embeddings)
 - ✅ CORS habilitado
 - ✅ Tratamento de erros robusto

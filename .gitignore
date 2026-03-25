@@ -9,17 +9,16 @@ dist/
 build/
 *.egg
 
-# Ambiente
-.env
-.env.local
+# Ambiente virtual
 .venv/
 venv/
 env/
 ENV/
-*.env
-.env.*
 
-# Credenciais e contas de serviço
+# Variáveis de ambiente e credenciais
+.env
+.env.*
+*.env
 service_account.json
 service-account.json
 service_account_*.json
@@ -33,8 +32,12 @@ credentials.json
 data/documents/*
 data/faiss_index/*
 data/faiss_index/*/
+data/temp_uploads/*
+data/verification_sessions/*
 !data/documents/.gitkeep
 !data/faiss_index/.gitkeep
+!data/temp_uploads/.gitkeep
+!data/verification_sessions/.gitkeep
 
 # Backups
 backup_*
@@ -56,6 +59,7 @@ faiss_backup_*
 Thumbs.db
 desktop.ini
 *.lnk
+nul
 
 # Logs
 *.log
@@ -64,15 +68,25 @@ logs/
 # Docker
 .dockerignore
 
-# Testes
+# Testes e scripts de teste
 .pytest_cache/
 .coverage
 htmlcov/
+test_api_keys.py
+test_api_curl.sh
+test_api_curl.ps1
+test_ollama_embeddings.py
+tests/
 
 # Temporários
 *.tmp
 *.bak
 temp/
+_temp_para_deletar/
 
-# Scripts de teste
-test_api_keys.py
+# Postman
+postman_collection.json
+postman_environment.json
+
+# PDFs de legislação (arquivos grandes)
+*.pdf

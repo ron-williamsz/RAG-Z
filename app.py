@@ -612,6 +612,9 @@ with gr.Blocks(
         status_btn = gr.Button("📊 Status Geral")
         status_output = gr.Textbox(label="Status", lines=6, interactive=False)
 
+    # Timer para auto-refresh do dropdown (sincroniza contextos criados via API)
+    dropdown_timer = gr.Timer(value=30)
+
     # =========================================================================
     # EVENTOS
     # =========================================================================
@@ -697,10 +700,19 @@ with gr.Blocks(
         outputs=[answer_output, sources_output],
     )
 
-    # Status
+    # Status + refresh do dropdown
     status_btn.click(
         fn=get_status,
         outputs=[status_output],
+    ).then(
+        fn=refresh_dropdown,
+        outputs=[context_dropdown],
+    )
+
+    # Auto-refresh do dropdown a cada 30s (sincroniza contextos criados via API)
+    dropdown_timer.tick(
+        fn=refresh_dropdown,
+        outputs=[context_dropdown],
     )
 
     # =========================================================================

@@ -949,7 +949,8 @@ async def index_documents(
         vector_store.save(file_names=file_names)
 
         # Atualiza metadados do contexto
-        cm.update_context_metadata(context, file_names)
+        stats = vector_store.get_stats()
+        cm.update_context_metadata(context, file_names, stats.get("total_documents", 0))
 
         # Limpa arquivos temporários
         for file_path in saved_files:
