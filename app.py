@@ -2,6 +2,7 @@
 
 import os
 import logging
+import httpx
 from pathlib import Path
 from typing import List, Optional
 
@@ -23,6 +24,29 @@ from src.context_manager import ContextManager
 
 # Carrega variáveis de ambiente
 load_dotenv()
+
+# BDforAll API
+BDFORALL_API_URL = os.getenv("BDFORALL_API_URL", "https://api.bdforall.grupozangari.com.br/api")
+
+
+def authenticate_bdforall(email: str, password: str) -> bool:
+    """Autentica usuário via API BDforAll."""
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                f"{BDFORALL_API_URL}/auth/login",
+                params={"email": email, "senha": password},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("access_token"):
+                    logging.info(f"[AUTH] Login OK: {email}")
+                    return True
+            logging.warning(f"[AUTH] Login falhou: {email} (status {resp.status_code})")
+            return False
+    except Exception as e:
+        logging.error(f"[AUTH] Erro ao autenticar: {e}")
+        return False
 
 
 # Estado global
@@ -1009,8 +1033,14 @@ if __name__ == "__main__":
         switch_context("default")
 
     # Inicia aplicação
+    demo.queue(
+        default_concurrency_limit=1,  # 1 indexação por vez (CPU)
+        max_size=10,                  # fila de até 10 requisições
+    )
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
+        auth=authenticate_bdforall,
+        auth_message="🔒 RAG Multi-Contexto — Login com suas credenciais BDforAll",
     )

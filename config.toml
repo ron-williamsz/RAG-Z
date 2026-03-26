@@ -23,7 +23,7 @@ max_tokens = 4096
 [embeddings]
 # Provedores disponíveis: "openai", "ollama"
 provider = "ollama"
-model = "bge-m3"
+model = "nomic-embed-text"
 # Ollama base URL - use host.docker.internal quando rodar no Docker
 # Para uso local (sem Docker), use http://localhost:11434
 base_url = "http://host.docker.internal:11434"
