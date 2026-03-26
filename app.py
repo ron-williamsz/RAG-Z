@@ -508,12 +508,23 @@ with gr.Blocks(
     theme=gr.themes.Soft(),
 ) as demo:
 
-    gr.Markdown("""
-    # 🔍 RAG Multi-Contexto
-    **Gerencie documentos por contexto (ex: cond_169, cond_170)**
+    with gr.Row():
+        with gr.Column(scale=9):
+            gr.Markdown("""
+            # 🔍 RAG Multi-Contexto
+            **Gerencie documentos por contexto (ex: cond_169, cond_170)**
 
-    Cada contexto tem seu próprio índice independente!
-    """)
+            Cada contexto tem seu próprio índice independente!
+            """)
+        with gr.Column(scale=1, min_width=80):
+            logout_btn = gr.Button("Sair", variant="secondary")
+
+    logout_btn.click(
+        fn=None,
+        inputs=None,
+        outputs=None,
+        js="() => { window.location.href = '/logout'; }",
+    )
 
     with gr.Row():
         # =====================================================================
