@@ -24,6 +24,8 @@ class RAGChain:
 
     DEFAULT_PROMPT_TEMPLATE = """Você é um assistente jurídico especializado em direito condominial brasileiro.
 
+<<BRAND_PERSONALITY>>
+
 Sua função é ajudar os usuários a entender as informações contidas nos documentos disponíveis de forma clara, completa e útil.
 
 ═══════════════════════════════════════════════════════════════
@@ -84,6 +86,8 @@ RESPOSTA:"""
     # Template com histórico de conversa (modo técnico)
     PROMPT_WITH_HISTORY_TEMPLATE = """Você é um assistente jurídico especializado em direito condominial brasileiro.
 
+<<BRAND_PERSONALITY>>
+
 {conversation_history}
 
 ═══════════════════════════════════════════════════════════════
@@ -135,6 +139,8 @@ RESPOSTA:"""
 
     FLUENT_PROMPT_TEMPLATE = """Você é um assistente prestativo do Grupo Zangari.
 
+<<BRAND_PERSONALITY>>
+
 {conversation_history}
 
 DOCUMENTOS ENCONTRADOS:
@@ -154,6 +160,8 @@ INSTRUÇÕES IMPORTANTES:
 RESPOSTA:"""
 
     FLUENT_WITH_SOURCE_PROMPT_TEMPLATE = """Você é um assistente prestativo do Grupo Zangari.
+
+<<BRAND_PERSONALITY>>
 
 {conversation_history}
 
@@ -187,6 +195,7 @@ RESPOSTA:"""
         use_toon: bool = True,
         system_context: str = "documentos e informações disponíveis",
         context_name: Optional[str] = None,
+        brand_personality: str = "",
     ):
         """
         Inicializa o RAG Chain.
@@ -213,6 +222,16 @@ RESPOSTA:"""
             system_context = f"documentos do contexto '{context_name}': {system_context}"
 
         self.system_context = system_context
+        # Substitui {context_name} no brand_personality.
+        # Para contextos cond_XXXX, usa o nome; caso contrario usa "o condominio atendido".
+        ctx = self.context_name
+        if ctx.startswith("cond_"):
+            friendly = ctx  # cond_0006 (o nome real e resolvido no widget)
+        else:
+            friendly = "o condominio atendido"
+        self.brand_personality = (brand_personality or "").replace(
+            "{context_name}", friendly
+        )
 
         # Configura LLM
         self._llm = self._create_llm(
@@ -222,10 +241,16 @@ RESPOSTA:"""
             max_tokens=max_tokens,
         )
 
-        # Configura prompt com o contexto do sistema
-        prompt_text = self.DEFAULT_PROMPT_TEMPLATE.replace("{system_context}", system_context)
+        # Configura prompt com o contexto do sistema e personalidade da marca
+        prompt_text = self.DEFAULT_PROMPT_TEMPLATE.replace(
+            "{system_context}", system_context
+        ).replace("<<BRAND_PERSONALITY>>", self.brand_personality)
         self._prompt = ChatPromptTemplate.from_template(prompt_text)
         self._output_parser = StrOutputParser()
+
+    def _inject_personality(self, template: str) -> str:
+        """Substitui o placeholder de personalidade no template."""
+        return template.replace("<<BRAND_PERSONALITY>>", self.brand_personality)
 
     @classmethod
     def from_config(
@@ -263,6 +288,7 @@ RESPOSTA:"""
             top_k=retrieval_config.get("top_k", 8),
             system_context=prompt_config.get("system_context", "documentos e informações disponíveis"),
             context_name=context_name,
+            brand_personality=prompt_config.get("brand_personality", ""),
         )
 
     def _create_llm(
@@ -373,7 +399,7 @@ RESPOSTA:"""
             history_text = f"## Histórico da Conversa\n{conversation_history}\n---\n"
 
         # Usa o prompt com histórico
-        prompt = ChatPromptTemplate.from_template(self.PROMPT_WITH_HISTORY_TEMPLATE)
+        prompt = ChatPromptTemplate.from_template(self._inject_personality(self.PROMPT_WITH_HISTORY_TEMPLATE))
         chain = prompt | self._llm | self._output_parser
 
         response = chain.invoke({
@@ -451,7 +477,7 @@ RESPOSTA:"""
         else:
             prompt_template = self.FLUENT_PROMPT_TEMPLATE
 
-        prompt = ChatPromptTemplate.from_template(prompt_template)
+        prompt = ChatPromptTemplate.from_template(self._inject_personality(prompt_template))
         chain = prompt | self._llm | self._output_parser
 
         response = chain.invoke({
