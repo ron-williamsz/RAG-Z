@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -156,6 +156,27 @@ class HealthResponse(BaseModel):
     embeddings_provider: str
 
 
+# ==================== API KEY AUTH ====================
+
+RAG_API_KEY = os.getenv("RAG_API_KEY", "")
+
+# Endpoints públicos (sem API key)
+PUBLIC_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/api/query", "/api/query/hierarchical"}
+
+
+def verify_api_key(request: Request, x_api_key: str = Header(None)):
+    """Verifica API key para endpoints protegidos."""
+    if not RAG_API_KEY:
+        return  # Se não há key configurada, tudo aberto (dev mode)
+    if request.url.path in PUBLIC_PATHS:
+        return
+    if request.method == "GET" and request.url.path.startswith("/api/contexts"):
+        return  # GET de contextos é público (listagem)
+    if x_api_key == RAG_API_KEY:
+        return
+    raise HTTPException(status_code=403, detail="API key inválida ou ausente. Envie header X-API-Key.")
+
+
 # ==================== APP ====================
 
 app = FastAPI(
@@ -164,6 +185,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    dependencies=[Depends(verify_api_key)],
 )
 
 # CORS - Permitir requisições de qualquer origem
@@ -995,16 +1017,16 @@ def list_contexts():
         context_infos = []
         for context_name in contexts:
             try:
-                stats = cm.get_context_stats(context_name)
+                metadata = cm.get_context_metadata(context_name) or {}
                 context_infos.append({
                     "name": context_name,
-                    "total_files": stats.get("total_files", 0),
-                    "total_chunks": stats.get("total_chunks", 0),
-                    "created_at": stats.get("created_at"),
-                    "last_updated": stats.get("last_updated"),
+                    "total_documents": metadata.get("total_documents", 0),
+                    "total_files": len(metadata.get("indexed_files", [])),
+                    "total_chunks": metadata.get("total_documents", 0),
+                    "created_at": metadata.get("created_at"),
+                    "last_updated": metadata.get("last_updated"),
                 })
             except Exception:
-                # Se houver erro ao pegar stats, adiciona info mínima
                 context_infos.append({
                     "name": context_name,
                     "total_files": 0,
@@ -1120,10 +1142,19 @@ def get_context_stats(context_name: str):
                 detail=f"Contexto '{context_name}' não encontrado."
             )
 
-        # Obtém estatísticas
-        stats = cm.get_context_stats(context_name)
+        # Obtém metadados do contexto
+        metadata = cm.get_context_metadata(context_name) or {}
 
-        return stats
+        return {
+            "context_name": context_name,
+            "total_documents": metadata.get("total_documents", 0),
+            "total_files": len(metadata.get("indexed_files", [])),
+            "indexed_files": metadata.get("indexed_files", []),
+            "last_updated": metadata.get("last_updated"),
+            "created_at": metadata.get("created_at"),
+            "description": metadata.get("description", ""),
+            "has_index": cm.has_index(context_name),
+        }
 
     except HTTPException:
         raise

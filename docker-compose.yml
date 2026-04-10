@@ -10,6 +10,7 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - RAG_API_KEY=${RAG_API_KEY}
     volumes:
       # Persistência LOCAL - dados visíveis no projeto
       - ./data/documents:/app/data/documents
